@@ -48,4 +48,8 @@ private[internal] object JsonUtils {
   def fromJson[T: Manifest](json: String): T = {
     mapper.readValue[T](json)
   }
+
+  def convertValueFromObject[T: Manifest](obj: Object): T = {
+    mapper.convertValue[T](obj)
+  }
 }
