@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.Objects;
 
 import io.delta.standalone.data.RowRecord;
-import scala.Option;
 
 /**
  * An {@link Expression} with two inputs and one output. The output is by default evaluated to null
