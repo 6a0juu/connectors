@@ -1,5 +1,6 @@
 package io.delta.standalone.expressions;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Objects;
 import java.util.Set;
@@ -53,6 +54,13 @@ public final class Column extends LeafExpression {
             throw new UnsupportedOperationException("The data type of column " + name +
                     " is " + dataType.getTypeName() + ". This is not supported yet.");
         }
+    }
+
+    public Column(ArrayList<String> name, DataType dataType, RowRecordEvaluator evaluator) {
+        this.name = name.toString();
+        this.dataType = dataType;
+        this.evaluator = evaluator;
+
     }
 
     public String name() {

@@ -67,7 +67,7 @@ final private[internal] class FilteredDeltaScanImpl(
     PartitionUtils.splitMetadataAndDataPredicates(expr, partitionColumns)
 
   override protected def accept(addFile: AddFile): Boolean = {
-    if (metadataConjunction.isEmpty) return true
+    if (metadataConjunction.isEmpty && dataConjunction.isEmpty) return true
 
     val partitionRowRecord = new PartitionRowRecord(partitionSchema, addFile.partitionValues)
     val result = metadataConjunction.get.eval(partitionRowRecord).asInstanceOf[Boolean]
@@ -78,6 +78,8 @@ final private[internal] class FilteredDeltaScanImpl(
     val minMaxValues: Map[String, String] =
       (statsValue.maxValues map {case (k, v) => (k + "." + MAX, v)}).++(
         statsValue.minValues map {case (k, v) => (k + "." + MIN, v)})
+    // TODO construct recursive all column stats by StructType &&
+    // TODO find values in the StructType in ColumnStatsRowRecord
 
     // make conjunctions by min/max and dataConjunction
     val columnStatsPredicate = constructDataFilters(dataConjunction.get).getOrElse {
