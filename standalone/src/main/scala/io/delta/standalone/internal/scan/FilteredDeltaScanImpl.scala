@@ -34,11 +34,11 @@ private [internal] case class ColumnStatsPredicate(
     expr: Expression,
     referencedStats: Set[StatsColumn])
 
-private [internal] case class AddFileStats( // TODO: dynamic stat struct
+private [internal] case class AddFileStats(
     numRecords: Long,
     nullCount: Map[String, Long],
-    minValues: Map[String, String], // TODO: extend type conversion
-    maxValues: Map[String, String]) // TODO: extend type conversion
+    minValues: Map[String, String],
+    maxValues: Map[String, String])
 
 /**
  * An implementation of [[io.delta.standalone.DeltaScan]] that filters files and only returns
@@ -51,6 +51,7 @@ final private[internal] class FilteredDeltaScanImpl(
     expr: Expression,
     partitionSchema: StructType,
     metadata: Metadata) extends DeltaScanImpl(replay) {
+  // TODO: Metadata -> Metadata.dataSchema = NULL
 
   /* The total number of records in the file. */
   final val NUM_RECORDS = "numRecords"
@@ -61,7 +62,7 @@ final private[internal] class FilteredDeltaScanImpl(
   /* The number of null values present for a column. */
   final val NULL_COUNT = "nullCount"
 
-  private val partitionColumns = metadata.partitionColumns
+  private val partitionColumns = partitionSchema.getFieldNames.toSeq
 
   private val (metadataConjunction, dataConjunction) =
     PartitionUtils.splitMetadataAndDataPredicates(expr, partitionColumns)
@@ -70,7 +71,7 @@ final private[internal] class FilteredDeltaScanImpl(
     if (metadataConjunction.isEmpty && dataConjunction.isEmpty) return true
 
     val partitionRowRecord = new PartitionRowRecord(partitionSchema, addFile.partitionValues)
-    val result = metadataConjunction.get.eval(partitionRowRecord).asInstanceOf[Boolean]
+    val result = metadataConjunction.get.eval[String](partitionRowRecord).asInstanceOf[Boolean]
 
     // parse min max in column stats
     val statsValue = JsonUtils.fromJson[AddFileStats](addFile.stats)
@@ -80,6 +81,7 @@ final private[internal] class FilteredDeltaScanImpl(
         statsValue.minValues map {case (k, v) => (k + "." + MIN, v)})
     // TODO construct recursive all column stats by StructType &&
     // TODO find values in the StructType in ColumnStatsRowRecord
+    val minMaxStruct: StructType = buildColumnStats(metadata.dataSchema, addFile.stats)
 
     // make conjunctions by min/max and dataConjunction
     val columnStatsPredicate = constructDataFilters(dataConjunction.get).getOrElse {
@@ -87,7 +89,7 @@ final private[internal] class FilteredDeltaScanImpl(
     }
 
     // eval, get Boolean result, and return
-    val dataRowRecord = new ColumnStatsRowRecord(metadata.dataSchema, minMaxValues)
+    val dataRowRecord = new ColumnStatsRowRecord(metadata.dataSchema, minMaxStruct)
 
     val finalColumnStatsPredicate = columnStatsPredicate
     // Add verifyStatsForFilter later
@@ -163,7 +165,37 @@ final private[internal] class FilteredDeltaScanImpl(
     }
   }
 
-/*
+  private def buildColumnStats(
+      tableSchema: StructType,
+      columnStats: String): StructType = {
+
+    val jsonMap = JsonUtils.fromJson[Map[String, String]](columnStats)
+    var res = new StructType()
+    tableSchema match {
+      case subSchema: StructType =>
+        subSchema.getFields.foreach { x =>
+          val subColumnStats = jsonMap.getOrElse(x.getName, null)
+          res.add(buildColumnStats(subSchema, subColumnStats))
+        }
+
+
+    }
+    val t1 = tableSchema.get(columnStats).getDataType match {
+      case y: StructType => buildColumnStats(_, columnStats, stringStack)
+      case z: StringType => new StructType({(StructField) })
+    }
+    var columnStatsStore = new StructType
+    tableSchema.getFields.foreach { field =>
+      columnStatsStore.add(
+
+      )
+    }
+
+
+    columnStatsStore
+  }
+
+  /*
   private def verifyStatsForFilter(
       referencedStats: Set[StatsColumn],
       addFile: AddFile,

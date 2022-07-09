@@ -55,7 +55,7 @@ public interface RowRecord {
      * @param fieldName  name of field/column, not {@code null}
      * @return whether the value of field {@code fieldName} is {@code null}
      */
-    boolean isNullAt(String fieldName);
+    boolean isNullAt(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive int.
@@ -66,7 +66,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    int getInt(String fieldName);
+    int getInt(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive long.
@@ -77,7 +77,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    long getLong(String fieldName);
+    long getLong(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive byte.
@@ -88,7 +88,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    byte getByte(String fieldName);
+    byte getByte(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive short.
@@ -99,7 +99,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    short getShort(String fieldName);
+    short getShort(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive boolean.
@@ -110,7 +110,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    boolean getBoolean(String fieldName);
+    boolean getBoolean(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive float.
@@ -121,7 +121,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    float getFloat(String fieldName);
+    float getFloat(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a primitive double.
@@ -132,7 +132,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if {@code null} data value read
      */
-    double getDouble(String fieldName);
+    double getDouble(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code String} object.
@@ -144,7 +144,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if field is not nullable and {@code null} data value read
      */
-    String getString(String fieldName);
+    String getString(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as binary (byte array).
@@ -156,7 +156,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if field is not nullable and {@code null} data value read
      */
-    byte[] getBinary(String fieldName);
+    byte[] getBinary(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code java.math.BigDecimal}.
@@ -168,7 +168,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if field is not nullable and {@code null} data value read
      */
-    BigDecimal getBigDecimal(String fieldName);
+    BigDecimal getBigDecimal(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code java.sql.Timestamp}.
@@ -180,7 +180,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if field is not nullable and {@code null} data value read
      */
-    Timestamp getTimestamp(String fieldName);
+    Timestamp getTimestamp(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code java.sql.Date}.
@@ -192,7 +192,7 @@ public interface RowRecord {
      * @throws ClassCastException if data type does not match
      * @throws NullPointerException if field is not nullable and {@code null} data value read
      */
-    Date getDate(String fieldName);
+    Date getDate(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code RowRecord} object.
@@ -205,7 +205,7 @@ public interface RowRecord {
      * @throws NullPointerException for this field or any nested field, if that field is not
      *                              nullable and {@code null} data value read
      */
-    RowRecord getRecord(String fieldName);
+    RowRecord getRecord(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code java.util.List<T>} object.
@@ -219,7 +219,7 @@ public interface RowRecord {
      * @throws NullPointerException for this field or any element field, if that field is not
      *                              nullable and {@code null} data value read
      */
-    <T> List<T> getList(String fieldName);
+    <T> List<T> getList(String[] fieldName);
 
     /**
      * Retrieves value from data record and returns the value as a {@code java.util.Map<K, V>}
@@ -235,5 +235,5 @@ public interface RowRecord {
      * @throws NullPointerException for this field or any key/value field, if that field is not
      *                              nullable and {@code null} data value read
      */
-    <K, V> Map<K, V> getMap(String fieldName);
+    <K, V> Map<K, V> getMap(String[] fieldName);
 }

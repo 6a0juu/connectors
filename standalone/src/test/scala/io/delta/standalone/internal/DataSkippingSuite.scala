@@ -78,4 +78,8 @@ class DataSkippingSuite extends FunSuite {
       print(iter.next().getStats + "\n")
     }
   }
+
+  test("integration test using spark-built delta table") {
+    //
+  }
 }

@@ -27,64 +27,64 @@ import io.delta.standalone.types.StructType
  * @param columnSchema abc
  * @param columnValue def
  */
-class ColumnStatsRowRecord(
+private[internal] class ColumnStatsRowRecord(
     columnSchema: StructType,
-    columnValue: Map[String, String]) extends RowRecord {
+    columnValue: StructType) extends RowRecord {
 
   override def getSchema: StructType = columnSchema
 
-  override def getLength: Int = columnValue.size
+  override def getLength: Int = columnValue.length()
 
-  override def isNullAt(fieldName: String): Boolean = !columnValue.contains(fieldName)
+  override def isNullAt(fieldName: Array[String]): Boolean = false
 
-  override def getInt(fieldName: String): Int =
-    columnValue.getOrElse(fieldName, null).toInt
+  override def getInt(fieldName: Array[String]): Int =
+    fieldName.head.toInt
 
-  override def getLong(fieldName: String): Long =
-    columnValue.getOrElse(fieldName, null).toLong
+  override def getLong(fieldName: Array[String]): Long =
+    columnValue.get(fieldName.head).getMetadata.get("123").toString.toInt
 
-  override def getByte(fieldName: String): Byte =
-    columnValue.getOrElse(fieldName, null).toByte
+  override def getByte(fieldName: Array[String]): Byte =
+    fieldName.head.toByte
 
-  override def getShort(fieldName: String): Short =
-    columnValue.getOrElse(fieldName, null).toShort
+  override def getShort(fieldName: Array[String]): Short =
+    fieldName.head.toShort
 
-  override def getBoolean(fieldName: String): Boolean =
-    columnValue.getOrElse(fieldName, null).toBoolean
+  override def getBoolean(fieldName: Array[String]): Boolean =
+    fieldName.head.toBoolean
 
-  override def getFloat(fieldName: String): Float =
-    columnValue.getOrElse(fieldName, null).toFloat
+  override def getFloat(fieldName: Array[String]): Float =
+    fieldName.head.toFloat
 
-  override def getDouble(fieldName: String): Double =
-    columnValue.getOrElse(fieldName, null).toDouble
+  override def getDouble(fieldName: Array[String]): Double =
+    fieldName.head.toDouble
 
-  override def getString(fieldName: String): String =
-    columnValue.getOrElse(fieldName, null)
+  override def getString(fieldName: Array[String]): String =
+    fieldName.head
 
-  override def getBinary(fieldName: String): Array[Byte] =
-    columnValue.getOrElse(fieldName, null).map(_.toByte).toArray
+  override def getBinary(fieldName: Array[String]): Array[Byte] =
+    fieldName.head.map(_.toByte).toArray
 
-  override def getBigDecimal(fieldName: String): java.math.BigDecimal =
+  override def getBigDecimal(fieldName: Array[String]): java.math.BigDecimal =
     throw new UnsupportedOperationException(
       "Map is not a supported partition type.")
 
-  override def getTimestamp(fieldName: String): Timestamp =
+  override def getTimestamp(fieldName: Array[String]): Timestamp =
     throw new UnsupportedOperationException(
       "Map is not a supported partition type.")
 
-  override def getDate(fieldName: String): Date =
+  override def getDate(fieldName: Array[String]): Date =
     throw new UnsupportedOperationException(
       "Map is not a supported partition type.")
 
-  override def getRecord(fieldName: String): RowRecord =
+  override def getRecord(fieldName: Array[String]): RowRecord =
     throw new UnsupportedOperationException(
       "Map is not a supported partition type.")
 
-  override def getList[T](fieldName: String): util.List[T] =
+  override def getList[E](fieldName: Array[String]): util.List[E] =
     throw new UnsupportedOperationException(
       "Map is not a supported partition type.")
 
-  override def getMap[K, V](fieldName: String): util.Map[K, V] =
+  override def getMap[K, V](fieldName: Array[String]): util.Map[K, V] =
     throw new UnsupportedOperationException(
       "Map is not a supported partition type.")
 }

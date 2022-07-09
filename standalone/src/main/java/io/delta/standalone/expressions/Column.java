@@ -1,6 +1,6 @@
 package io.delta.standalone.expressions;
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Objects;
 import java.util.Set;
@@ -18,11 +18,11 @@ import io.delta.standalone.types.*;
  * <a href="https://github.com/delta-io/delta/blob/master/PROTOCOL.md#primitive-types">Delta Transaction Log Protocol: Primitive Types</a>.
  */
 public final class Column extends LeafExpression {
-    private final String name;
+    private final String[] name;
     private final DataType dataType;
     private final RowRecordEvaluator evaluator;
 
-    public Column(String name, DataType dataType) {
+    public Column(String[] name, DataType dataType) {
         this.name = name;
         this.dataType = dataType;
 
@@ -51,24 +51,18 @@ public final class Column extends LeafExpression {
         } else if (dataType instanceof DateType) {
             evaluator = (record -> record.getDate(name));
         } else {
-            throw new UnsupportedOperationException("The data type of column " + name +
+            throw new UnsupportedOperationException("The data type of column " + Arrays.toString(name) +
                     " is " + dataType.getTypeName() + ". This is not supported yet.");
         }
     }
 
-    public Column(ArrayList<String> name, DataType dataType, RowRecordEvaluator evaluator) {
-        this.name = name.toString();
-        this.dataType = dataType;
-        this.evaluator = evaluator;
-
-    }
-
-    public String name() {
-        return name;
+    public Column(String name, DataType dataType) {
+        this(new String[]{name}, dataType);
     }
 
     @Override
     public Object eval(RowRecord record) {
+        // TODO: add generics type checking
         return record.isNullAt(name) ? null : evaluator.nullSafeEval(record);
     }
 
@@ -79,12 +73,12 @@ public final class Column extends LeafExpression {
 
     @Override
     public String toString() {
-        return "Column(" + name + ")";
+        return "Column(" + Arrays.toString(name) + ")";
     }
 
     @Override
     public Set<String> references() {
-        return Collections.singleton(name);
+        return Collections.singleton(Arrays.toString(name));
     }
 
     @Override
@@ -92,13 +86,13 @@ public final class Column extends LeafExpression {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         Column column = (Column) o;
-        return Objects.equals(name, column.name) &&
+        return Arrays.equals(name, column.name) &&
             Objects.equals(dataType, column.dataType);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, dataType);
+        return Objects.hash(Arrays.hashCode(name), dataType);
     }
 
     @FunctionalInterface
