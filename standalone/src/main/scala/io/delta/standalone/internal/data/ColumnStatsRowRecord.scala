@@ -16,65 +16,82 @@
 
 package io.delta.standalone.internal.data
 
+import java.math.BigDecimal
 import java.sql.{Date, Timestamp}
 import java.util
 
 import io.delta.standalone.data.RowRecord
 import io.delta.standalone.types.StructType
 
+import io.delta.standalone.internal.exception.DeltaErrors
+import io.delta.standalone.internal.scan.ColumnNode
+
 /**
  * The record for data mapping
  * @param columnSchema abc
- * @param columnValue def
+ * @param statsValue def
  */
 private[internal] class ColumnStatsRowRecord(
     columnSchema: StructType,
-    columnValue: StructType) extends RowRecord {
+    statsValue: ColumnNode) extends RowRecord {
+
+  private def getRawString(fieldName: Array[String]): Option[String] = {
+    var curStats = statsValue
+    val statsType = fieldName.last
+    fieldName.dropRight(1).foreach { x =>
+      curStats = curStats.nestedColumns.getOrElse(x,
+        throw DeltaErrors.nullValueFoundForNonNullSchemaField(
+          fieldName.mkString("Column(", ".", ")"), columnSchema))
+    }
+    curStats.statsValue.get(statsType)
+  }
 
   override def getSchema: StructType = columnSchema
 
-  override def getLength: Int = columnValue.length()
+  override def getLength: Int = statsValue.nestedColumns.size
 
-  override def isNullAt(fieldName: Array[String]): Boolean = false
+  override def isNullAt(fieldName: Array[String]): Boolean =
+    getRawString(fieldName).isEmpty
 
   override def getInt(fieldName: Array[String]): Int =
-    fieldName.head.toInt
+    getRawString(fieldName).orNull.toInt
 
   override def getLong(fieldName: Array[String]): Long =
-    columnValue.get(fieldName.head).getMetadata.get("123").toString.toInt
+    getRawString(fieldName).orNull.toLong
 
   override def getByte(fieldName: Array[String]): Byte =
-    fieldName.head.toByte
+    getRawString(fieldName).orNull.toByte
 
   override def getShort(fieldName: Array[String]): Short =
-    fieldName.head.toShort
+    getRawString(fieldName).orNull.toShort
 
   override def getBoolean(fieldName: Array[String]): Boolean =
-    fieldName.head.toBoolean
+    getRawString(fieldName).orNull.toBoolean
 
   override def getFloat(fieldName: Array[String]): Float =
-    fieldName.head.toFloat
+    getRawString(fieldName).orNull.toFloat
 
   override def getDouble(fieldName: Array[String]): Double =
-    fieldName.head.toDouble
+    getRawString(fieldName).orNull.toDouble
 
-  override def getString(fieldName: Array[String]): String =
-    fieldName.head
+  override def getString(fieldName: Array[String]): String = {
+    getRawString(fieldName).orNull
+    // TODO long string truncation
+  }
 
   override def getBinary(fieldName: Array[String]): Array[Byte] =
-    fieldName.head.map(_.toByte).toArray
+    getRawString(fieldName).orNull.map(_.toByte).toArray
 
-  override def getBigDecimal(fieldName: Array[String]): java.math.BigDecimal =
-    throw new UnsupportedOperationException(
-      "Map is not a supported partition type.")
+  override def getBigDecimal(fieldName: Array[String]): BigDecimal =
+    getRawString(fieldName).map(new BigDecimal(_)).orNull
 
-  override def getTimestamp(fieldName: Array[String]): Timestamp =
-    throw new UnsupportedOperationException(
-      "Map is not a supported partition type.")
+  override def getTimestamp(fieldName: Array[String]): Timestamp = {
+    getRawString(fieldName).map(Timestamp.valueOf).orNull
+    // TODO timestamp truncation
+  }
 
   override def getDate(fieldName: Array[String]): Date =
-    throw new UnsupportedOperationException(
-      "Map is not a supported partition type.")
+    getRawString(fieldName).map(Date.valueOf).orNull
 
   override def getRecord(fieldName: Array[String]): RowRecord =
     throw new UnsupportedOperationException(

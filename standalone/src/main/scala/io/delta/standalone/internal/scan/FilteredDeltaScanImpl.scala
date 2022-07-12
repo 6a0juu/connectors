@@ -18,27 +18,26 @@ package io.delta.standalone.internal.scan
 
 import java.util.Optional
 
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThanOrEqual, IsNotNull, IsNull, LessThanOrEqual, Literal, Not, Or}
-import io.delta.standalone.types.{BooleanType, DataType, DateType, LongType, StringType, StructField, StructType, TimestampType}
+import scala.collection.mutable
 
-import io.delta.standalone.internal.actions.{AddFile, MemoryOptimizedLogReplay, Metadata}
-import io.delta.standalone.internal.data.{ColumnStatsRowRecord, PartitionRowRecord, RowParquetRecordImpl}
-import io.delta.standalone.internal.util.{DataTypeParser, JsonUtils, PartitionUtils}
+import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, In, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or}
+import io.delta.standalone.types.{DataType, LongType, StructType}
 
-
-private [internal] case class StatsColumn(
-    statType: String,
-    pathToColumn: Seq[String] = Nil)
+import io.delta.standalone.internal.actions.{AddFile, MemoryOptimizedLogReplay}
+import io.delta.standalone.internal.data.{ColumnStatsRowRecord, PartitionRowRecord}
+import io.delta.standalone.internal.exception.DeltaErrors
+import io.delta.standalone.internal.util.{JsonUtils, PartitionUtils}
 
 private [internal] case class ColumnStatsPredicate(
     expr: Expression,
-    referencedStats: Set[StatsColumn])
+    referencedStats: Set[Column])
 
-private [internal] case class AddFileStats(
-    numRecords: Long,
-    nullCount: Map[String, Long],
-    minValues: Map[String, String],
-    maxValues: Map[String, String])
+private[internal] case class ColumnNode(
+    var dataType: DataType = new StructType(),
+    columnPath: Seq[String] = Nil,
+    nestedColumns: mutable.Map[String, ColumnNode]
+      = mutable.Map.empty[String, ColumnNode],
+    statsValue: mutable.Map[String, String] = mutable.Map.empty[String, String])
 
 /**
  * An implementation of [[io.delta.standalone.DeltaScan]] that filters files and only returns
@@ -50,9 +49,7 @@ final private[internal] class FilteredDeltaScanImpl(
     replay: MemoryOptimizedLogReplay,
     expr: Expression,
     partitionSchema: StructType,
-    metadata: Metadata) extends DeltaScanImpl(replay) {
-  // TODO: Metadata -> Metadata.dataSchema = NULL
-
+    tableSchema: StructType) extends DeltaScanImpl(replay) {
   /* The total number of records in the file. */
   final val NUM_RECORDS = "numRecords"
   /* The smallest (possibly truncated) value for a column. */
@@ -67,32 +64,35 @@ final private[internal] class FilteredDeltaScanImpl(
   private val (metadataConjunction, dataConjunction) =
     PartitionUtils.splitMetadataAndDataPredicates(expr, partitionColumns)
 
+  private var statsStore = ColumnNode()
+
   override protected def accept(addFile: AddFile): Boolean = {
     if (metadataConjunction.isEmpty && dataConjunction.isEmpty) return true
 
+    // filter the Delta Scan files by partition values
     val partitionRowRecord = new PartitionRowRecord(partitionSchema, addFile.partitionValues)
-    val result = metadataConjunction.get.eval[String](partitionRowRecord).asInstanceOf[Boolean]
+    val result = metadataConjunction.get.eval(partitionRowRecord).asInstanceOf[Boolean]
 
-    // parse min max in column stats
-    val statsValue = JsonUtils.fromJson[AddFileStats](addFile.stats)
-    // keep min max stats only
-    val minMaxValues: Map[String, String] =
-      (statsValue.maxValues map {case (k, v) => (k + "." + MAX, v)}).++(
-        statsValue.minValues map {case (k, v) => (k + "." + MIN, v)})
-    // TODO construct recursive all column stats by StructType &&
-    // TODO find values in the StructType in ColumnStatsRowRecord
-    val minMaxStruct: StructType = buildColumnStats(metadata.dataSchema, addFile.stats)
+    // recursively construct all column stats by ColumnStatsInternal &&
+    // find values in the StructType in ColumnStatsRowRecord
+    JsonUtils.fromJson[Map[String, String]](addFile.stats) foreach { stats =>
+      statsStore = parseColumnStats(
+        tableSchema,
+        statsStr = stats._2,
+        statsType = stats._1,
+        statsStore)
+    }
 
-    // make conjunctions by min/max and dataConjunction
+    // construct column evaluator
+    val dataRowRecord = new ColumnStatsRowRecord(tableSchema, statsStore)
+
+    // make filters by column stats and data conjunction in query
     val columnStatsPredicate = constructDataFilters(dataConjunction.get).getOrElse {
       return result
     }
+    val finalColumnStatsPredicate = new And(columnStatsPredicate.expr,
+      verifyStatsForFilter(columnStatsPredicate.referencedStats))
 
-    // eval, get Boolean result, and return
-    val dataRowRecord = new ColumnStatsRowRecord(metadata.dataSchema, minMaxStruct)
-
-    val finalColumnStatsPredicate = columnStatsPredicate
-    // Add verifyStatsForFilter later
     val columnStatsFilterResult = finalColumnStatsPredicate
       .eval(dataRowRecord)
       .asInstanceOf[Boolean]
@@ -108,138 +108,331 @@ final private[internal] class FilteredDeltaScanImpl(
   override def getResidualPredicate: Optional[Expression] =
     Optional.ofNullable(dataConjunction.orNull)
 
-  private def constructDataFilters(expression: Expression):
-    Option[Expression] = expression match {
-    case andExpr: And =>
-      val e1 = andExpr.getLeft
-      val e2 = andExpr.getRight
-      val e1Filter = constructDataFilters(e1)
-      val e2Filter = constructDataFilters(e2)
-      if (e1Filter.isDefined && e2Filter.isDefined) {
-        Some(new And(e1Filter.get, e2Filter.get))
-      } else if (e1Filter.isDefined) {
-        e1Filter
+  // TODO the same as `parseAttributeName` in
+  //  `org/apache/spark/sql/catalyst/analysis/unresolved.scala`
+  /*
+  private def parseAndValidateColumn(name: String): Seq[String] = {
+    val e = DeltaErrors.invalidColumnName("exprStr")
+    val nameParts = mutable.ArrayBuffer.empty[String]
+    val tmp = mutable.ArrayBuffer.empty[Char]
+    var inBacktick = false
+    var i = 0
+    while (i < name.length) {
+      val char = name(i)
+      if (inBacktick) {
+        if (char == '`') {
+          if (i + 1 < name.length && name(i + 1) == '`') {
+            tmp += '`'
+            i += 1
+          } else {
+            inBacktick = false
+            if (i + 1 < name.length && name(i + 1) != '.') throw e
+          }
+        } else {
+          tmp += char
+        }
       } else {
-        e2Filter  // possibly None
+        if (char == '`') {
+          if (tmp.nonEmpty) throw e
+          inBacktick = true
+        } else if (char == '.') {
+          if (name(i - 1) == '.' || i == name.length - 1) throw e
+          nameParts += tmp.mkString
+          tmp.clear()
+        } else {
+          tmp += char
+        }
+      }
+      i += 1
+    }
+    if (inBacktick) throw e
+    nameParts += tmp.mkString
+    nameParts
+  }
+   */
+
+  private def findColumnNode(path: Seq[String]): Option[ColumnNode] = {
+    var curSchema: Option[ColumnNode] = Some(statsStore)
+    path foreach { x =>
+      if (curSchema.isEmpty || !curSchema.get.dataType.isInstanceOf[StructType]) {
+        return None
+      }
+      curSchema = curSchema.get.nestedColumns.get(x)
+    }
+    curSchema
+  }
+
+  /*
+  private def findColumnStatsInBatch(path: Seq[String], statTypes: Seq[String]):
+  Option[Seq[(DataType, String)]] = {
+    val columnNode = findColumnNode(path).getOrElse {
+      return None
+    }
+    val columnStatsExtractor = columnNode.statsValue.getOrElse(_, return None)
+    Some(statTypes.map {
+      case MAX => (columnNode.dataType, columnStatsExtractor(MAX))
+      case MIN => (columnNode.dataType, columnStatsExtractor(MIN))
+      case NULL_COUNT => (LongType, columnStatsExtractor(NULL_COUNT))
+      case NUM_RECORDS => (LongType, statsStore.statsValue.getOrElse(NUM_RECORDS, return None))
+    })
+  }
+   */
+
+  def parseColumnStats(
+      tableSchema: DataType,
+      statsStr: String,
+      statsType: String,
+      structuredStats: ColumnNode): ColumnNode = tableSchema match {
+    case structNode: StructType =>
+      val newStats = structuredStats
+      structNode.getFields.foreach { fieldName =>
+        val jsonMapper = JsonUtils.fromJson[Map[String, String]](statsStr)
+        val originSubStatsStr = jsonMapper.getOrElse(fieldName.getName, null)
+        if (originSubStatsStr == null) {
+          throw DeltaErrors.nullValueFoundForNonNullSchemaField(fieldName.getName, structNode)
+        }
+
+        val originSubStats = newStats.nestedColumns
+          .getOrElseUpdate(fieldName.getName, ColumnNode())
+        newStats.columnPath :+ fieldName.getName
+        val newSubStats = parseColumnStats(
+          fieldName.getDataType,
+          originSubStatsStr,
+          statsType,
+          originSubStats
+        )
+
+        // TODO make this by shallow copy
+        newStats.nestedColumns += (fieldName.getName -> newSubStats)
+      }
+      newStats
+    case dataNode: DataType =>
+      val newStats = structuredStats
+      newStats.dataType = dataNode
+      newStats.statsValue += (statsType -> statsStr)
+      newStats
+  }
+
+  private def constructDataFilters(expression: Expression):
+    Option[ColumnStatsPredicate] = expression match {
+    case and: And =>
+      val e1 = constructDataFilters(and.getLeft)
+      val e2 = constructDataFilters(and.getRight)
+      if (e1.isDefined && e2.isDefined) {
+        Some(ColumnStatsPredicate(
+          new And(e1.get.expr, e2.get.expr),
+          e1.get.referencedStats ++ e2.get.referencedStats))
+      } else if (e1.isDefined) {
+        e1
+      } else {
+        e2  // possibly None
       }
 
-    case orExpr: Or =>
-      val e1 = orExpr.getLeft
-      val e2 = orExpr.getRight
-      val e1Filter = constructDataFilters(e1)
-      val e2Filter = constructDataFilters(e2)
-      if (e1Filter.isDefined && e2Filter.isDefined) {
-        Some(new Or(e1Filter.get, e2Filter.get))
+    case or: Or =>
+      val e1 = constructDataFilters(or.getLeft)
+      val e2 = constructDataFilters(or.getRight)
+      if (e1.isDefined && e2.isDefined) {
+        Some(ColumnStatsPredicate(
+          new Or(e1.get.expr, e2.get.expr),
+          e1.get.referencedStats ++ e2.get.referencedStats))
       } else {
         None
       }
 
-    case eqExpr: EqualTo =>
-      var e1 = eqExpr.getLeft
-      var e2 = eqExpr.getRight
-      if (eqExpr.getLeft.isInstanceOf[Literal]) {
-        e1 = eqExpr.getRight
-        e2 = eqExpr.getLeft
-      }
-      // assume e2 is Literal and e1 is Column
-      val column = e1.asInstanceOf[Column]
-      val minColumn = new Column(column.name() + "." + MIN, column.dataType())
-      val maxColumn = new Column(column.name() + "." + MAX, column.dataType())
-      // TODO extend data type
-        Some(new And(new LessThanOrEqual(minColumn, e2),
-          new GreaterThanOrEqual(maxColumn, e2)))
+    case isNull: IsNull => isNull.children().get(0) match {
+      case child: Column =>
+        val columnPath = child.getName
+        val nullCount = new Column(columnPath :+ NULL_COUNT, new LongType())
 
-    // TODO: ...
+        Some(ColumnStatsPredicate(
+          new GreaterThan(nullCount, Literal.of(0)),
+          Set(nullCount)))
+
+      case _ => None
+    }
+
+    case isNotNull: IsNotNull => isNotNull.children().get(0) match {
+      case child: Column =>
+        val columnPath = child.getName
+        val nullCount = new Column(columnPath :+ NULL_COUNT, new LongType())
+        val numRecords = new Column(NUM_RECORDS, new LongType())
+
+        Some(ColumnStatsPredicate(
+          new LessThan(nullCount, numRecords),
+          Set(nullCount, numRecords)))
+
+      case _ => None
+    }
+
+    case eq: EqualTo => (eq.getLeft, eq.getRight) match {
+      case (e1: Column, e2: Literal) =>
+        val columnPath = e1.getName
+        val columnNode = findColumnNode(columnPath).getOrElse(return None)
+        val minColumn = new Column(columnPath :+ MIN, columnNode.dataType)
+        val maxColumn = new Column(columnPath :+ MAX, columnNode.dataType)
+
+        Some(ColumnStatsPredicate(
+          new And(new LessThanOrEqual(minColumn, e2),
+            new GreaterThanOrEqual(maxColumn, e2)),
+          Set(minColumn, maxColumn)))
+
+      case (_: Literal, _: Literal) => Some(ColumnStatsPredicate(eq, Set()))
+      case (e1: Literal, e2: Column) => constructDataFilters(new EqualTo(e2, e1))
+      case (e1: Column, e2: Column) =>
+        val e1Path = e1.getName
+        val e1Node = findColumnNode(e1Path).getOrElse(return None)
+        val e1Min = new Column(e1Path :+ MIN, e1Node.dataType)
+        val e1Max = new Column(e1Path :+ MAX, e1Node.dataType)
+        val e2Path = e2.getName
+        val e2Node = findColumnNode(e2Path).getOrElse(return None)
+        val e2Min = new Column(e2Path :+ MIN, e2Node.dataType)
+        val e2Max = new Column(e2Path :+ MAX, e2Node.dataType)
+
+        Some(ColumnStatsPredicate(
+          new And(new GreaterThanOrEqual(e1Max, e2Min),
+            new LessThanOrEqual(e1Min, e2Max)),
+          Set(e1Min, e1Max, e2Min, e2Max)))
+      case _ => None
+    }
+
+    // TODO refactor all these into 3 types: binary operation, binary comparison
+    //  and unary expression
+    case lt: LessThan => (lt.getLeft, lt.getRight) match {
+      case (Column, Literal) =>
+        val e1 = lt.getLeft
+        val e2 = lt.getRight
+
+        val columnPath = e1.asInstanceOf[Column].getName
+        val columnNode = findColumnNode(columnPath).getOrElse(return None)
+        val minColumn = new Column(columnPath :+ MIN, columnNode.dataType)
+
+        Some(ColumnStatsPredicate(
+          new LessThan(minColumn, e2),
+          Set(minColumn)))
+
+      case (Literal, Literal) => Some(ColumnStatsPredicate(lt, Set()))
+      case (Literal, Column) => constructDataFilters(new GreaterThanOrEqual(lt.getRight, lt.getLeft))
+      case _ => None
+    }
+
+    case leq: LessThanOrEqual => (leq.getLeft, leq.getRight) match {
+      case (Column, Literal) =>
+        val e1 = leq.getLeft
+        val e2 = leq.getRight
+
+        val columnPath = e1.asInstanceOf[Column].getName
+        val columnNode = findColumnNode(columnPath).getOrElse(return None)
+        val minColumn = new Column(columnPath :+ MIN, columnNode.dataType)
+
+        Some(ColumnStatsPredicate(
+          new LessThanOrEqual(minColumn, e2),
+          Set(minColumn)))
+
+      case (Literal, Literal) => Some(ColumnStatsPredicate(leq, Set()))
+      case (Literal, Column) => constructDataFilters(new GreaterThan(leq.getRight, leq.getLeft))
+      case _ => None
+    }
+
+    case gt: GreaterThan => (gt.getLeft, gt.getRight) match {
+      case (Column, Literal) =>
+        val e1 = gt.getLeft
+        val e2 = gt.getRight
+
+        val columnPath = e1.asInstanceOf[Column].getName
+        val columnNode = findColumnNode(columnPath).getOrElse(return None)
+        val maxColumn = new Column(columnPath :+ MAX, columnNode.dataType)
+
+        Some(ColumnStatsPredicate(
+          new GreaterThan(maxColumn, e2),
+          Set(maxColumn)))
+
+      case (Literal, Literal) => Some(ColumnStatsPredicate(gt, Set()))
+      case (Literal, Column) => constructDataFilters(new LessThanOrEqual(gt.getRight, gt.getLeft))
+      case _ => None
+    }
+
+    case geq: LessThanOrEqual => (geq.getLeft, geq.getRight) match {
+      case (Column, Literal) =>
+        val e1 = geq.getLeft
+        val e2 = geq.getRight
+
+        val columnPath = e1.asInstanceOf[Column].getName
+        val columnNode = findColumnNode(columnPath).getOrElse(return None)
+        val maxColumn = new Column(columnPath :+ MAX, columnNode.dataType)
+
+        Some(ColumnStatsPredicate(
+          new GreaterThanOrEqual(maxColumn, e2),
+          Set(maxColumn)))
+
+      case (Literal, Literal) => Some(ColumnStatsPredicate(geq, Set()))
+      case (Literal, Column) => constructDataFilters(new LessThan(geq.getRight, geq.getLeft))
+      case _ => None
+    }
+
+    // TODO ordering package is needed in Standalone to sort IN-list
+    case in: In => None
+    /*
+      import scala.collection.convert.ImplicitConversions._
+      val list = in.children()
+      if (list.size() <= 0) return Some(ColumnStatsPredicate(Literal.False, Set()))
+      list.toArray[Expression].reduceLeft(_ min _)
+     */
+
+    case not: Not => not.children().get(0) match {
+      case and: And =>
+        constructDataFilters(new Or(new Not(and.getLeft), new Not(and.getRight)))
+      case or: Or =>
+        constructDataFilters(new And(new Not(or.getLeft), new Not(or.getRight)))
+      case isNull: IsNull =>
+        constructDataFilters(new IsNotNull(isNull.children().get(0)))
+      case isNotNull: IsNotNull =>
+        constructDataFilters(new IsNull(isNotNull.children().get(0)))
+      case eq: EqualTo => (eq.getLeft, eq.getRight) match {
+        case (Column, Literal) =>
+          val e1 = eq.getLeft
+          val e2 = eq.getRight
+
+          val columnPath = e1.asInstanceOf[Column].getName
+          val columnNode = findColumnNode(columnPath).getOrElse(return None)
+          val minColumn = new Column(columnPath :+ MIN, columnNode.dataType)
+          val maxColumn = new Column(columnPath :+ MAX, columnNode.dataType)
+
+          Some(ColumnStatsPredicate(
+            new Or(new LessThan(minColumn, e2),
+              new GreaterThan(maxColumn, e2)),
+            Set(columnPath :+ MIN, columnPath :+ MAX)))
+
+        case (Literal, Literal) => Some(ColumnStatsPredicate(new Not(eq), Set()))
+        case (Literal, Column) => constructDataFilters(new Not(new EqualTo(eq.getRight, eq.getLeft)))
+        case _ => None
+      }
+      case lt: LessThan =>
+        constructDataFilters(new GreaterThanOrEqual(lt.getLeft, lt.getRight))
+      case leq: LessThanOrEqual =>
+        constructDataFilters(new GreaterThan(leq.getLeft, leq.getRight))
+      case gt: GreaterThan =>
+        constructDataFilters(new LessThanOrEqual(gt.getLeft, gt.getRight))
+      case geq: GreaterThanOrEqual =>
+        constructDataFilters(new LessThan(geq.getLeft, geq.getRight))
+      case in: In => None
+      // TODO add ordering support to Standalone
+    }
+
     // Unknown expression type... can't use it for data skipping.
     case _ => None
   }
 
-  object SkippingEligibleLiteral {
-    def unapply(arg: Literal): Option[Expression] = {
-      if (isEligibleDataType(arg.dataType)) Some(Literal.True) else None
-    }
-
-    def isEligibleDataType(dt: DataType): Boolean = dt match {
-      // TODO case _: LongType | DateType | TimestampType | StringType => true
-      case _ => false
-    }
-  }
-
-  private def buildColumnStats(
-      tableSchema: StructType,
-      columnStats: String): StructType = {
-
-    val jsonMap = JsonUtils.fromJson[Map[String, String]](columnStats)
-    var res = new StructType()
-    tableSchema match {
-      case subSchema: StructType =>
-        subSchema.getFields.foreach { x =>
-          val subColumnStats = jsonMap.getOrElse(x.getName, null)
-          res.add(buildColumnStats(subSchema, subColumnStats))
-        }
-
-
-    }
-    val t1 = tableSchema.get(columnStats).getDataType match {
-      case y: StructType => buildColumnStats(_, columnStats, stringStack)
-      case z: StringType => new StructType({(StructField) })
-    }
-    var columnStatsStore = new StructType
-    tableSchema.getFields.foreach { field =>
-      columnStatsStore.add(
-
-      )
-    }
-
-
-    columnStatsStore
-  }
-
-  /*
   private def verifyStatsForFilter(
-      referencedStats: Set[StatsColumn],
-      addFile: AddFile,
-      metadata: Metadata): Expression = {
-    val statsSchema = JsonUtils.fromJson[AddFileStats](addFile.stats)
-    /* TODO parse more value type
-    statsSchema.maxValues.map { x =>
-      val fieldName = x._1
-      val fieldDataType = metadata.getSchema.get(fieldName).getDataType
-      fieldDataType.fromJson()
-      val fieldValue = JsonUtils.convertValueFromObject[fieldDataType.type](x._2)
-    }
-     */
-    referencedStats.map { stat =>
-      val columnName = stat.pathToColumn.head // TODO: support nested column later
-      val nullCount: Long = statsSchema.nullCount.getOrElse(columnName, null)
-      val numRecords: Long = statsSchema.numRecords
-    }
+      referencedStats: Set[Column]): Expression = {
+    referencedStats.filter(_.getName.length <= 0).map { refStats =>
+      refStats.getName.last match {
+        case MAX | MIN =>
+          val nullCount = new Column(refStats.getName.dropRight(1), new LongType())
+          val numRecords = new Column(NUM_RECORDS, new LongType())
+          new Or(new IsNotNull(refStats), new EqualTo(nullCount, numRecords))
 
-
-    /*
-    referencedStats.flatMap { stat => stat match {
-      case StatsColumn(MIN, _) | StatsColumn(MAX, _) =>
-        Seq(stat, StatsColumn(NULL_COUNT, stat.pathToColumn), StatsColumn(NUM_RECORDS))
-      case _ =>
-        Seq(stat)
-    }}.map {
-      case stat @ (StatsColumn(MIN, _) | StatsColumn(MAX, _)) =>
-        // A usable MIN or MAX stat must be non-NULL, unless the column is provably all-NULL
-        //
-        // NOTE: We don't care about NULL/missing NULL_COUNT and NUM_RECORDS here, because the
-        // separate NULL checks we emit for those columns will force the overall validation
-        // predicate conjunction to FALSE in that case -- AND(FALSE, <anything>) is FALSE.
-        new Or(getStatsColumnOpt(stat.statType, addFile, stat.pathToColumn)
-        .getOrElse(Literal.ofNull(new BooleanType)),
-          new EqualTo(getStatsColumnOpt(NULL_COUNT, addFile, stat.pathToColumn)
-          .getOrElse(Literal.ofNull(new BooleanType)),
-            getStatsColumnOpt(NUM_RECORDS, addFile).getOrElse(Literal.ofNull(new BooleanType))))
-      case stat =>
-        // Other stats, such as NULL_COUNT and NUM_RECORDS stat, merely need to be non-NULL
-        getStatsColumnOpt(stat.statType, addFile, stat.pathToColumn)
-        .getOrElse(Literal.ofNull(new BooleanType))
-    }.reduceLeftOption(new And(_, _)).getOrElse(Literal.ofNull(new BooleanType))
-     */
+        case _ => new IsNotNull(refStats)
+      }
+    }.reduceLeft(new And(_, _))
   }
- */
 }

@@ -51,8 +51,9 @@ public final class Column extends LeafExpression {
         } else if (dataType instanceof DateType) {
             evaluator = (record -> record.getDate(name));
         } else {
-            throw new UnsupportedOperationException("The data type of column " + Arrays.toString(name) +
-                    " is " + dataType.getTypeName() + ". This is not supported yet.");
+            throw new UnsupportedOperationException("The data type of column " +
+                    Arrays.toString(name) + " is " + dataType.getTypeName() +
+                    ". This is not supported yet.");
         }
     }
 
@@ -62,7 +63,6 @@ public final class Column extends LeafExpression {
 
     @Override
     public Object eval(RowRecord record) {
-        // TODO: add generics type checking
         return record.isNullAt(name) ? null : evaluator.nullSafeEval(record);
     }
 
@@ -93,6 +93,10 @@ public final class Column extends LeafExpression {
     @Override
     public int hashCode() {
         return Objects.hash(Arrays.hashCode(name), dataType);
+    }
+
+    public String[] getName() {
+        return name;
     }
 
     @FunctionalInterface
