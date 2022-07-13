@@ -28,8 +28,8 @@ import io.delta.standalone.internal.scan.ColumnNode
 
 /**
  * The record for data mapping
- * @param columnSchema abc
- * @param statsValue def
+ * @param columnSchema the table schema to get data type
+ * @param statsValue the corresponding column node in stats store
  */
 private[internal] class ColumnStatsRowRecord(
     columnSchema: StructType,
