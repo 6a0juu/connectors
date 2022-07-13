@@ -20,6 +20,8 @@ import java.util.Optional
 
 import scala.collection.mutable
 
+import com.fasterxml.jackson.databind.JsonNode
+
 import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, In, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or}
 import io.delta.standalone.types.{DataType, LongType, StructType}
 
@@ -75,13 +77,7 @@ final private[internal] class FilteredDeltaScanImpl(
 
     // recursively construct all column stats by ColumnStatsInternal &&
     // find values in the StructType in ColumnStatsRowRecord
-    JsonUtils.fromJson[Map[String, String]](addFile.stats) foreach { stats =>
-      statsStore = parseColumnStats(
-        tableSchema,
-        statsStr = stats._2,
-        statsType = stats._1,
-        statsStore)
-    }
+    parseColumnStats(tableSchema, addFile)
 
     // construct column evaluator
     val dataRowRecord = new ColumnStatsRowRecord(tableSchema, statsStore)
@@ -108,50 +104,8 @@ final private[internal] class FilteredDeltaScanImpl(
   override def getResidualPredicate: Optional[Expression] =
     Optional.ofNullable(dataConjunction.orNull)
 
-  // TODO the same as `parseAttributeName` in
-  //  `org/apache/spark/sql/catalyst/analysis/unresolved.scala`
-  /*
-  private def parseAndValidateColumn(name: String): Seq[String] = {
-    val e = DeltaErrors.invalidColumnName("exprStr")
-    val nameParts = mutable.ArrayBuffer.empty[String]
-    val tmp = mutable.ArrayBuffer.empty[Char]
-    var inBacktick = false
-    var i = 0
-    while (i < name.length) {
-      val char = name(i)
-      if (inBacktick) {
-        if (char == '`') {
-          if (i + 1 < name.length && name(i + 1) == '`') {
-            tmp += '`'
-            i += 1
-          } else {
-            inBacktick = false
-            if (i + 1 < name.length && name(i + 1) != '.') throw e
-          }
-        } else {
-          tmp += char
-        }
-      } else {
-        if (char == '`') {
-          if (tmp.nonEmpty) throw e
-          inBacktick = true
-        } else if (char == '.') {
-          if (name(i - 1) == '.' || i == name.length - 1) throw e
-          nameParts += tmp.mkString
-          tmp.clear()
-        } else {
-          tmp += char
-        }
-      }
-      i += 1
-    }
-    if (inBacktick) throw e
-    nameParts += tmp.mkString
-    nameParts
-  }
-   */
-
-  private def findColumnNode(path: Seq[String]): Option[ColumnNode] = {
+  /** Get column stats from the given path */
+  def findColumnNode(path: Seq[String]): Option[ColumnNode] = {
     var curSchema: Option[ColumnNode] = Some(statsStore)
     path foreach { x =>
       if (curSchema.isEmpty || !curSchema.get.dataType.isInstanceOf[StructType]) {
@@ -162,58 +116,71 @@ final private[internal] class FilteredDeltaScanImpl(
     curSchema
   }
 
-  /*
-  private def findColumnStatsInBatch(path: Seq[String], statTypes: Seq[String]):
-  Option[Seq[(DataType, String)]] = {
-    val columnNode = findColumnNode(path).getOrElse {
-      return None
-    }
-    val columnStatsExtractor = columnNode.statsValue.getOrElse(_, return None)
-    Some(statTypes.map {
-      case MAX => (columnNode.dataType, columnStatsExtractor(MAX))
-      case MIN => (columnNode.dataType, columnStatsExtractor(MIN))
-      case NULL_COUNT => (LongType, columnStatsExtractor(NULL_COUNT))
-      case NUM_RECORDS => (LongType, statsStore.statsValue.getOrElse(NUM_RECORDS, return None))
-    })
-  }
-   */
-
+  /** Parse the entire [[AddFile.stats]] string based on table schema */
   def parseColumnStats(
       tableSchema: DataType,
-      statsStr: String,
+      addFile: AddFile): Unit = {
+    // Reset the store for current AddFile
+    statsStore = ColumnNode()
+
+    JsonUtils.fromJson[Map[String, JsonNode]](addFile.stats) foreach { stats =>
+      if (!stats._2.isObject) {
+        // This is an table-level stats, add to root node directly
+        statsStore.statsValue += (stats._1 -> stats._2.asText)
+      } else {
+        // Update the store in the every stats type sequence
+        statsStore = parseColumnStats(
+          tableSchema,
+          statsNode = stats._2,
+          statsType = stats._1,
+          statsStore)
+      }
+    }
+  }
+
+  /** Parse the column stats recursively based on table schema */
+  def parseColumnStats(
+      tableSchema: DataType,
+      statsNode: JsonNode,
       statsType: String,
       structuredStats: ColumnNode): ColumnNode = tableSchema match {
     case structNode: StructType =>
-      val newStats = structuredStats
+      // This is a structured column, iterate through all the nested columns and parse them
+      // recursively.
+
+      // Get the previous stored column stats for this column, if there are.
+      val originStats = structuredStats
       structNode.getFields.foreach { fieldName =>
-        val jsonMapper = JsonUtils.fromJson[Map[String, String]](statsStr)
-        val originSubStatsStr = jsonMapper.getOrElse(fieldName.getName, null)
-        if (originSubStatsStr == null) {
-          throw DeltaErrors.nullValueFoundForNonNullSchemaField(fieldName.getName, structNode)
+        val originSubStatsNode = statsNode.get(fieldName.getName)
+        if (originSubStatsNode != null) {
+          // If there is not such sub column in table schema, skip it.
+
+          // Get the previous stored column stats for this sub column, if there are.
+          val originSubStats = originStats.nestedColumns
+            .getOrElseUpdate(fieldName.getName,
+              ColumnNode(columnPath = originStats.columnPath :+ fieldName.getName))
+
+          // Parse and update the nested column nodes to the current column node.
+          val newSubStats = parseColumnStats(
+            fieldName.getDataType,
+            originSubStatsNode,
+            statsType,
+            originSubStats)
+          originStats.nestedColumns += (fieldName.getName -> newSubStats)
         }
-
-        val originSubStats = newStats.nestedColumns
-          .getOrElseUpdate(fieldName.getName, ColumnNode())
-        newStats.columnPath :+ fieldName.getName
-        val newSubStats = parseColumnStats(
-          fieldName.getDataType,
-          originSubStatsStr,
-          statsType,
-          originSubStats
-        )
-
-        // TODO make this by shallow copy
-        newStats.nestedColumns += (fieldName.getName -> newSubStats)
       }
-      newStats
+      originStats
+
     case dataNode: DataType =>
-      val newStats = structuredStats
-      newStats.dataType = dataNode
-      newStats.statsValue += (statsType -> statsStr)
-      newStats
+      // This is a leaf column (data column), parse the corresponding stats value in string format.
+      ColumnNode(
+        dataNode,
+        structuredStats.columnPath,
+        structuredStats.nestedColumns,
+        structuredStats.statsValue + (statsType -> statsNode.asText))
   }
 
-  private def constructDataFilters(expression: Expression):
+  def constructDataFilters(expression: Expression):
     Option[ColumnStatsPredicate] = expression match {
     case and: And =>
       val e1 = constructDataFilters(and.getLeft)
@@ -295,32 +262,37 @@ final private[internal] class FilteredDeltaScanImpl(
       case _ => None
     }
 
+
+
     // TODO refactor all these into 3 types: binary operation, binary comparison
     //  and unary expression
     case lt: LessThan => (lt.getLeft, lt.getRight) match {
-      case (Column, Literal) =>
-        val e1 = lt.getLeft
-        val e2 = lt.getRight
-
-        val columnPath = e1.asInstanceOf[Column].getName
+      case (e1: Column, e2: Literal) =>
+        val columnPath = e1.getName
         val columnNode = findColumnNode(columnPath).getOrElse(return None)
         val minColumn = new Column(columnPath :+ MIN, columnNode.dataType)
 
         Some(ColumnStatsPredicate(
           new LessThan(minColumn, e2),
           Set(minColumn)))
+      case (_: Literal, _: Literal) => Some(ColumnStatsPredicate(lt, Set()))
+      case (e1: Literal, e2: Column) => constructDataFilters(
+        new GreaterThanOrEqual(e2, e1))
+      case (e1: Column, e2: Column) =>
+        val e1Path = e1.getName
+        val e1Node = findColumnNode(e1Path).getOrElse(return None)
+        val e1Min = new Column(e1Path :+ MIN, e1Node.dataType)
+        val e2Path = e2.getName
+        val e2Node = findColumnNode(e2Path).getOrElse(return None)
+        val e2Max = new Column(e2Path :+ MAX, e2Node.dataType)
 
-      case (Literal, Literal) => Some(ColumnStatsPredicate(lt, Set()))
-      case (Literal, Column) => constructDataFilters(new GreaterThanOrEqual(lt.getRight, lt.getLeft))
+        Some(ColumnStatsPredicate(new LessThan(e1Min, e2Max), Set(e1Min, e2Max)))
       case _ => None
     }
 
     case leq: LessThanOrEqual => (leq.getLeft, leq.getRight) match {
-      case (Column, Literal) =>
-        val e1 = leq.getLeft
-        val e2 = leq.getRight
-
-        val columnPath = e1.asInstanceOf[Column].getName
+      case (e1: Column, e2: Literal) =>
+        val columnPath = e1.getName
         val columnNode = findColumnNode(columnPath).getOrElse(return None)
         val minColumn = new Column(columnPath :+ MIN, columnNode.dataType)
 
@@ -328,50 +300,69 @@ final private[internal] class FilteredDeltaScanImpl(
           new LessThanOrEqual(minColumn, e2),
           Set(minColumn)))
 
-      case (Literal, Literal) => Some(ColumnStatsPredicate(leq, Set()))
-      case (Literal, Column) => constructDataFilters(new GreaterThan(leq.getRight, leq.getLeft))
+      case (_: Literal, _: Literal) => Some(ColumnStatsPredicate(leq, Set()))
+      case (e1: Literal, e2: Column) => constructDataFilters(new GreaterThan(e2, e1))
+      case (e1: Column, e2: Column) =>
+        val e1Path = e1.getName
+        val e1Node = findColumnNode(e1Path).getOrElse(return None)
+        val e1Min = new Column(e1Path :+ MIN, e1Node.dataType)
+        val e2Path = e2.getName
+        val e2Node = findColumnNode(e2Path).getOrElse(return None)
+        val e2Max = new Column(e2Path :+ MAX, e2Node.dataType)
+
+        Some(ColumnStatsPredicate(new LessThanOrEqual(e1Min, e2Max), Set(e1Min, e2Max)))
       case _ => None
     }
 
     case gt: GreaterThan => (gt.getLeft, gt.getRight) match {
-      case (Column, Literal) =>
-        val e1 = gt.getLeft
-        val e2 = gt.getRight
-
-        val columnPath = e1.asInstanceOf[Column].getName
+      case (e1: Column, e2: Literal) =>
+        val columnPath = e1.getName
         val columnNode = findColumnNode(columnPath).getOrElse(return None)
         val maxColumn = new Column(columnPath :+ MAX, columnNode.dataType)
 
         Some(ColumnStatsPredicate(
           new GreaterThan(maxColumn, e2),
           Set(maxColumn)))
-
-      case (Literal, Literal) => Some(ColumnStatsPredicate(gt, Set()))
+      case (_: Literal, _: Literal) => Some(ColumnStatsPredicate(gt, Set()))
       case (Literal, Column) => constructDataFilters(new LessThanOrEqual(gt.getRight, gt.getLeft))
+      case (e1: Column, e2: Column) =>
+        val e1Path = e1.getName
+        val e1Node = findColumnNode(e1Path).getOrElse(return None)
+        val e1Max = new Column(e1Path :+ MAX, e1Node.dataType)
+        val e2Path = e2.getName
+        val e2Node = findColumnNode(e2Path).getOrElse(return None)
+        val e2Min = new Column(e2Path :+ MIN, e2Node.dataType)
+
+        Some(ColumnStatsPredicate(new GreaterThan(e1Max, e2Min), Set(e1Max, e2Min)))
       case _ => None
     }
 
     case geq: LessThanOrEqual => (geq.getLeft, geq.getRight) match {
-      case (Column, Literal) =>
-        val e1 = geq.getLeft
-        val e2 = geq.getRight
-
-        val columnPath = e1.asInstanceOf[Column].getName
+      case (e1: Column, e2: Literal) =>
+        val columnPath = e1.getName
         val columnNode = findColumnNode(columnPath).getOrElse(return None)
         val maxColumn = new Column(columnPath :+ MAX, columnNode.dataType)
 
         Some(ColumnStatsPredicate(
           new GreaterThanOrEqual(maxColumn, e2),
           Set(maxColumn)))
+      case (_: Literal, _: Literal) => Some(ColumnStatsPredicate(geq, Set()))
+      case (e1: Literal, e2: Column) => constructDataFilters(new LessThan(e2, e1))
+      case (e1: Column, e2: Column) =>
+        val e1Path = e1.getName
+        val e1Node = findColumnNode(e1Path).getOrElse(return None)
+        val e1Max = new Column(e1Path :+ MAX, e1Node.dataType)
+        val e2Path = e2.getName
+        val e2Node = findColumnNode(e2Path).getOrElse(return None)
+        val e2Min = new Column(e2Path :+ MIN, e2Node.dataType)
 
-      case (Literal, Literal) => Some(ColumnStatsPredicate(geq, Set()))
-      case (Literal, Column) => constructDataFilters(new LessThan(geq.getRight, geq.getLeft))
+        Some(ColumnStatsPredicate(new GreaterThanOrEqual(e1Max, e2Min), Set(e1Max, e2Min)))
       case _ => None
     }
 
     // TODO ordering package is needed in Standalone to sort IN-list
-    case in: In => None
     /*
+    case in: In => None
       import scala.collection.convert.ImplicitConversions._
       val list = in.children()
       if (list.size() <= 0) return Some(ColumnStatsPredicate(Literal.False, Set()))
@@ -403,7 +394,9 @@ final private[internal] class FilteredDeltaScanImpl(
             Set(columnPath :+ MIN, columnPath :+ MAX)))
 
         case (Literal, Literal) => Some(ColumnStatsPredicate(new Not(eq), Set()))
-        case (Literal, Column) => constructDataFilters(new Not(new EqualTo(eq.getRight, eq.getLeft)))
+        case (Literal, Column) => constructDataFilters(
+          new Not(new EqualTo(eq.getRight, eq.getLeft)))
+        case ()
         case _ => None
       }
       case lt: LessThan =>

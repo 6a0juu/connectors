@@ -16,70 +16,186 @@
 
 package io.delta.standalone.internal
 
-import scala.collection.JavaConverters._
+import java.util.TimeZone
 
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.FunSuite
 
-import io.delta.standalone.{DeltaLog, Operation}
-import io.delta.standalone.expressions.{And, EqualTo, GreaterThanOrEqual, Literal}
-import io.delta.standalone.types.{IntegerType, LongType, StringType, StructField, StructType}
+import io.delta.standalone.DeltaLog
+import io.delta.standalone.expressions.Literal
+import io.delta.standalone.types.{DateType, DoubleType, IntegerType, StringType, StructField, StructType}
 
-import io.delta.standalone.internal.actions.{Action, AddFile, Metadata}
+import io.delta.standalone.internal.actions.{AddFile, MemoryOptimizedLogReplay}
+import io.delta.standalone.internal.scan.FilteredDeltaScanImpl
+import io.delta.standalone.internal.storage.LogStoreProvider
 import io.delta.standalone.internal.util.TestUtils._
 
 class DataSkippingSuite extends FunSuite {
-  private val op = new Operation(Operation.Name.WRITE)
+  /* The total number of records in the file. */
+  final val NUM_RECORDS = "numRecords"
+  /* The smallest (possibly truncated) value for a column. */
+  final val MIN = "minValues"
+  /* The largest (possibly truncated) value for a column. */
+  final val MAX = "maxValues"
+  /* The number of null values present for a column. */
+  final val NULL_COUNT = "nullCount"
 
   private val partitionSchema = new StructType(Array(
-    new StructField("col1", new IntegerType(), true),
-    new StructField("col2", new IntegerType(), true)
+    new StructField("col1", new IntegerType(), true)
   ))
 
-  private val schema = new StructType(Array(
+  private val flatTableSchema = new StructType(Array(
     new StructField("col1", new IntegerType(), true),
-    new StructField("col2", new IntegerType(), true),
-    new StructField("col3", new IntegerType(), true),
-    new StructField("col4", new IntegerType(), true)
+    new StructField("col2", new StringType(), true)
   ))
 
-  val metadata: Metadata = Metadata(
-    partitionColumns = partitionSchema.getFieldNames, schemaString = schema.toJson)
+  private val nestedTableSchema = new StructType(Array(
+    new StructField("col1", new IntegerType(), true),
+    new StructField("col2", new StructType(Array(
+      new StructField("col2_1", new DateType(), true),
+      new StructField("col2_2", new DoubleType(), true)
+    )), true)
+  ))
 
+  // `col1` is missing compared to `nestedTableSchema`
+  private val incompleteTableSchema = new StructType(Array(
+    new StructField("col2", new StructType(Array(
+      new StructField("col2_1", new DateType(), true),
+      new StructField("col2_2", new DoubleType(), true)
+    )), true)
+  ))
 
-  private val files = (1 to 9).map { i =>
-    val partitionValues = Map("col1" -> (i % 3).toString, "col2" -> (i % 2).toString)
-    val columnStats = "\"{\\\"numRecords\\\":1,\\\"minValues\\\":{\\\"col3\\\":" + i.toString +
-      ",\\\"col4\\\":" + (i*2).toString + "}," +
-      "\\\"maxValues\\\":{\\\"col3\\\":" + i.toString + ",\\\"col4\\\":" +
-      (i*2).toString + "},\\\"nullCount\\\":{\\\"col3\\\":0,\\\"col4\\\":0}}\""
-    AddFile(i.toString, partitionValues, 1L, 1L, dataChange = true, stats = columnStats)
-  }
-  // all types can be automatically parsed here
+  private val flatColumnStats = """
+                                  | {
+                                  |   "minValues": {
+                                  |     "col1":11,
+                                  |     "col2":"test"
+                                  |   },
+                                  |   "maxValues": {
+                                  |     "col1":22,
+                                  |     "col2":"vest"
+                                  |   },
+                                  |   "numRecords":2
+                                  | }
+                                  |""".stripMargin
 
-  private val metadataConjunct = new GreaterThanOrEqual(schema.column("col1"), Literal.of(0))
-  private val dataConjunct = new EqualTo(schema.column("col3"), Literal.of(5))
+  private val nestedColumnStats = """
+                                    | {
+                                    |   "numRecords":1,
+                                    |   "minValues": {
+                                    |     "col1":11,
+                                    |     "col2": {
+                                    |       "col2_1":"JUL11",
+                                    |       "col2_2":11.1
+                                    |     }
+                                    |   }
+                                    | }
+                                    |""".stripMargin
 
-  def withLog(actions: Seq[Action])(test: DeltaLog => Unit): Unit = {
+  // Column `col2_2` is missing compared to `nestedColumnStats`
+  private val incompleteColumnStats = """
+                                        | {
+                                        |   "numRecords":1,
+                                        |   "minValues": {
+                                        |     "col1":11,
+                                        |     "col2": {
+                                        |       "col2_2":11.1
+                                        |     }
+                                        |   }
+                                        | }
+                                        |""".stripMargin
+
+  /**
+   * Creates a temporary [[FilteredDeltaScanImpl]] instance, which is then passed to `scan`
+   */
+  def withDeltaScan (scan: FilteredDeltaScanImpl => Unit): Unit = {
     withTempDir { dir =>
-      val log = DeltaLog.forTable(new Configuration(), dir.getCanonicalPath)
-      log.startTransaction().commit(metadata :: Nil, op, "engineInfo")
-      log.startTransaction().commit(actions, op, "engineInfo")
+      val hadoopConf = new Configuration()
+      DeltaLog.forTable(hadoopConf, dir.getCanonicalPath)
 
-      test(log)
+      val memoryOptimizedLogReplay = new MemoryOptimizedLogReplay(
+        Nil,
+        LogStoreProvider.createLogStore(hadoopConf),
+        hadoopConf,
+        TimeZone.getDefault)
+
+      val filteredScan = new FilteredDeltaScanImpl(
+        memoryOptimizedLogReplay,
+        expr = Literal.True,
+        partitionSchema)
+
+      scan(filteredScan)
     }
   }
 
-  withLog(files) { log =>
-    val scan = log.update().scan(new And(dataConjunct, metadataConjunct))
-    print(scan.getPushedPredicate.get().toString)
-    val iter = scan.getFiles
-    while (iter.hasNext) {
-      print(iter.next().getStats + "\n")
+  def testStatsParser(
+      tableSchema: StructType,
+      columnStats: String,
+      conditions: Seq[FilteredDeltaScanImpl => Boolean]): Unit = {
+    withDeltaScan { scan =>
+      val file = AddFile("flat file", Map(), 1L, 1L, dataChange = true, stats = columnStats)
+      scan.parseColumnStats(tableSchema, file)
+      conditions.foreach { cond =>
+        assert(cond(scan))
+      }
     }
   }
 
-  test("integration test using spark-built delta table") {
+  /**
+   * Phase 1: Parse and store the column stats from AddFile
+   */
+  test("unit test 1.1: Parse and store stats with data columns") {
+    testStatsParser(flatTableSchema, flatColumnStats, Seq(
+      _.findColumnNode(Seq()).orNull.statsValue(NUM_RECORDS) == "2",
+      _.findColumnNode(Seq("col1")).orNull.statsValue(MIN) == "11",
+      _.findColumnNode(Seq("col1")).orNull.statsValue(MAX) == "22",
+      _.findColumnNode(Seq("col1")).orNull.columnPath == Seq("col1"),
+      _.findColumnNode(Seq("col1")).orNull.dataType.getTypeName == "integer",
+      _.findColumnNode(Seq("col2")).orNull.statsValue(MIN) == "test",
+      _.findColumnNode(Seq("col2")).orNull.statsValue(MAX) == "vest",
+      _.findColumnNode(Seq("col2")).orNull.columnPath == Seq("col2"),
+      _.findColumnNode(Seq("col2")).orNull.dataType.getTypeName == "string"))
+  }
+
+  test("unit test 1.2: Parse and store stats with nested columns") {
+    testStatsParser(nestedTableSchema, nestedColumnStats, Seq(
+      _.findColumnNode(Seq()).orNull.statsValue(NUM_RECORDS) == "1",
+      _.findColumnNode(Seq("col1")).orNull.statsValue(MIN) == "11",
+      _.findColumnNode(Seq("col1")).orNull.columnPath == Seq("col1"),
+      _.findColumnNode(Seq("col2", "col2_1")).orNull.statsValue(MIN) == "JUL11",
+      _.findColumnNode(Seq("col2", "col2_1")).orNull.columnPath == Seq("col2", "col2_1"),
+      _.findColumnNode(Seq("col2", "col2_1")).orNull.dataType.getTypeName == "date",
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.statsValue(MIN) == "11.1",
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.columnPath == Seq("col2", "col2_2"),
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.dataType.getTypeName == "double"))
+  }
+
+  test("unit test 1.3: The missing stats should remain as `null` in statsStore") {
+    testStatsParser(nestedTableSchema, incompleteColumnStats, Seq(
+      _.findColumnNode(Seq()).orNull.statsValue(NUM_RECORDS) == "1",
+      _.findColumnNode(Seq("col2", "col2_1")).orNull == null,
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.statsValue(MIN) == "11.1",
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.columnPath == Seq("col2", "col2_2"),
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.dataType.getTypeName == "double"))
+  }
+
+  test("unit test 1.4: The stats' column cannot found in table schema should be discarded.") {
+    testStatsParser(incompleteTableSchema, nestedColumnStats, Seq(
+      _.findColumnNode(Seq()).orNull.statsValue(NUM_RECORDS) == "1",
+      _.findColumnNode(Seq("col1")).orNull == null,
+      _.findColumnNode(Seq("col2", "col2_1")).orNull.statsValue(MIN) == "JUL11",
+      _.findColumnNode(Seq("col2", "col2_1")).orNull.columnPath == Seq("col2", "col2_1"),
+      _.findColumnNode(Seq("col2", "col2_1")).orNull.dataType.getTypeName == "date",
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.statsValue(MIN) == "11.1",
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.columnPath == Seq("col2", "col2_2"),
+      _.findColumnNode(Seq("col2", "col2_2")).orNull.dataType.getTypeName == "double"))
+  }
+
+  /**
+   * Phase 2: Transform the expression based on column stats
+   */
+
+  test("") {
     //
   }
 }
