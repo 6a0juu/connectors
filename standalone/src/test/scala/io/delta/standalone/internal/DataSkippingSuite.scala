@@ -16,15 +16,18 @@
 
 package io.delta.standalone.internal
 
+import java.sql.{Date, Timestamp}
+
 import com.fasterxml.jackson.core.io.JsonEOFException
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.FunSuite
 
 import io.delta.standalone.{DeltaLog, Operation}
 import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThanOrEqual, IsNotNull, LessThanOrEqual, Literal}
-import io.delta.standalone.types.{LongType, StringType, StructField, StructType}
+import io.delta.standalone.types.{BinaryType, BooleanType, ByteType, DateType, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType, TimestampType}
 
 import io.delta.standalone.internal.actions.{Action, AddFile, Metadata}
+import io.delta.standalone.internal.data.ColumnStatsRowRecord
 import io.delta.standalone.internal.util.DataSkippingUtils
 import io.delta.standalone.internal.util.TestUtils._
 
@@ -49,16 +52,45 @@ class DataSkippingSuite extends FunSuite {
       new StructField("subCol2", new LongType(), true)
     )), true)))
 
+  private val fullTypeSchema = new StructType(Array(
+    new StructField("binaryCol", new BinaryType, true),
+    new StructField("booleanCol", new BooleanType, true),
+    new StructField("byteCol", new ByteType, true),
+    new StructField("dateCol", new DateType, true),
+    new StructField("doubleCol", new DoubleType, true),
+    new StructField("floatCol", new FloatType, true),
+    new StructField("integerCol", new IntegerType, true),
+    new StructField("longCol", new LongType, true),
+    new StructField("shortCol", new ShortType, true),
+    new StructField("stringCol", new StringType, true),
+    new StructField("timestampCol", new TimestampType, true)))
+
+  private def postfixMax(s: String): String = s"$s.${DataSkippingUtils.MAX}"
+  private def postfixMin(s: String): String = s"$s.${DataSkippingUtils.MIN}"
+
+  private val fullTypeColumnStats = Map[String, String](
+    postfixMax("binaryCol") -> "ab\"d",
+    postfixMax("booleanCol") -> "false",
+    postfixMax("byteCol") -> "121",
+    postfixMax("dateCol") -> "2022-07-17",
+    postfixMax("doubleCol") -> "11.1",
+    postfixMax("floatCol") -> "12.2",
+    postfixMax("integerCol") -> "123456",
+    postfixMax("longCol") -> "4400000000",
+    postfixMax("shortCol") -> "32100",
+    postfixMax("stringCol") -> "ab\"d",
+    postfixMax("timestampCol") -> "2022-05-16 09:00:00"
+  )
+
   val metadata: Metadata = Metadata(partitionColumns = partitionSchema.getFieldNames,
     schemaString = schema.toJson)
 
   def buildFiles(
-      customStats: Option[String] = None,
-      isStrColHasValue: Boolean = false): Seq[AddFile] = (1 to 20).map { i =>
+      customStats: Option[String] = None): Seq[AddFile] = (1 to 20).map { i =>
     val partitionColValue = i.toString
     val col1Value = (i % 3).toString
     val col2Value = (i % 4).toString
-    val stringColValue = if (isStrColHasValue) "\"a\"" else "null"
+    val stringColValue = "\"a\""
     val partitionValues = Map("partitionCol" -> partitionColValue)
     val fullColumnStats = s"""
       | {
@@ -137,9 +169,11 @@ class DataSkippingSuite extends FunSuite {
 
   private val dataConjunct = new EqualTo(schema.column("col1"), Literal.of(1L))
 
-  def withDeltaLog(actions: Seq[Action], isNested: Boolean) (l: DeltaLog => Unit): Unit = {
+  def withDeltaLog(
+      actions: Seq[Action],
+      customMetadata: Option[Metadata]) (l: DeltaLog => Unit): Unit = {
     withTempDir { dir =>
-      val m = if (isNested) nestedMetadata else metadata
+      val m = customMetadata.getOrElse(metadata)
       val log = DeltaLog.forTable(new Configuration(), dir.getCanonicalPath)
       log.startTransaction().commit(m :: Nil, op, "engineInfo")
       log.startTransaction().commit(actions, op, "engineInfo")
@@ -156,8 +190,8 @@ class DataSkippingSuite extends FunSuite {
    */
   def parseColumnStatsTest(
       statsString: String,
-      fileStatsTarget: Map[String, Long],
-      columnStatsTarget: Map[String, Long],
+      fileStatsTarget: Map[String, String],
+      columnStatsTarget: Map[String, String],
       isNestedSchema: Boolean = false): Unit = {
     val s = if (isNestedSchema) nestedSchema else schema
     val (fileStats, columnStats) = DataSkippingUtils.parseColumnStats(
@@ -170,12 +204,12 @@ class DataSkippingSuite extends FunSuite {
    * Unit test - parseColumnStats
    */
   test("parse column stats: basic") {
-    val fileStatsTarget = Map("numRecords" -> 1L)
+    val fileStatsTarget = Map("numRecords" -> "1")
     val columnStatsTarget = Map(
-      "partitionCol.maxValues" -> 1L, "col2.nullCount" -> 0L, "col2.minValues" -> 1L,
-      "col1.maxValues" -> 1L, "partitionCol.minValues" -> 1L, "col2.maxValues" -> 1L,
-      "col1.nullCount" -> 0L, "col1.minValues" -> 1L, "stringCol.nullCount" -> 1L,
-      "partitionCol.nullCount" -> 0L)
+      "partitionCol.maxValues" -> "1", "col2.nullCount" -> "0", "col2.minValues" -> "1",
+      "col1.maxValues" -> "1", "partitionCol.minValues" -> "1", "col2.maxValues" -> "1",
+      "stringCol.minValues" -> "a", "stringCol.maxValues" -> "a", "col1.nullCount" -> "0",
+      "col1.minValues" -> "1", "stringCol.nullCount" -> "1", "partitionCol.nullCount" -> "0")
     // Though `stringCol` is not LongType, its `nullCount` stats will be documented
     // while `minValues` and `maxValues` won't be.
     parseColumnStatsTest(unwrappedStats, fileStatsTarget, columnStatsTarget)
@@ -183,14 +217,14 @@ class DataSkippingSuite extends FunSuite {
 
   test("parse column stats: ignore nested columns") {
     val inputStats = """{"minValues":{"normalCol": 1, "parentCol":{"subCol1": 1, "subCol2": 2}}}"""
-    val fileStatsTarget = Map[String, Long]()
-    val columnStatsTarget = Map("normalCol.minValues" -> 1L)
+    val fileStatsTarget = Map[String, String]()
+    val columnStatsTarget = Map("normalCol.minValues" -> "1")
     parseColumnStatsTest(inputStats, fileStatsTarget, columnStatsTarget, isNestedSchema = true)
   }
 
   test("parse column stats: wrong JSON format") {
-    val fileStatsTarget = Map[String, Long]()
-    val columnStatsTarget = Map[String, Long]()
+    val fileStatsTarget = Map[String, String]()
+    val columnStatsTarget = Map[String, String]()
     val e = intercept[JsonEOFException] {
       parseColumnStatsTest(statsString = brokenStats,
         fileStatsTarget, columnStatsTarget)
@@ -200,9 +234,9 @@ class DataSkippingSuite extends FunSuite {
 
   test("parse column stats: missing stats from schema") {
     val inputStats = """{"minValues":{"partitionCol": 1, "col1": 2}}"""
-    val fileStatsTarget = Map[String, Long]()
-    val columnStatsTarget = Map[String, Long](
-      "partitionCol.minValues" -> 1, "col1.minValues" -> 2)
+    val fileStatsTarget = Map[String, String]()
+    val columnStatsTarget = Map[String, String](
+      "partitionCol.minValues" -> "1", "col1.minValues" -> "2")
     parseColumnStatsTest(inputStats, fileStatsTarget, columnStatsTarget)
   }
 
@@ -239,7 +273,7 @@ class DataSkippingSuite extends FunSuite {
       target = Some("((Column(col1.minValues) <= 1) && (Column(col1.maxValues) >= 1))"))
   }
 
-  test("filter construction: simple AND") {
+  test("filter construction: AND with EqualTo") {
     // col1 = 1 AND col2 = 1
     constructDataFilterTest(
       in = new And(new EqualTo(new Column("col1", new LongType), Literal.of(1L)),
@@ -262,13 +296,6 @@ class DataSkippingSuite extends FunSuite {
       target = None)
   }
 
-  test("filter construction: stats not in LongType will be ignored") {
-    // stringCol = 1
-    constructDataFilterTest(
-      in = new EqualTo(new Column("stringCol", new LongType), Literal.of(1L)),
-      target = None)
-  }
-
   test("filter construction: empty expression will return if schema is missing") {
     // col1 = 1
     constructDataFilterTest(
@@ -282,17 +309,17 @@ class DataSkippingSuite extends FunSuite {
    * @param expr              the input query predicate
    * @param target            the file list that is not skipped by evaluating column stats
    * @param customStats       the customized stats string. If none, use default stats
-   * @param isStrColHasValue  whether testing with a non-null string value
-   * @param isNestedSchema    whether using nested schema
+   * @param customFiles       the customized action files. If none, use default files
+   * @param customMetadata    the customized metadata. If none, use default metadata
    */
   def filePruningTest(
       expr: Expression,
       target: Seq[String],
       customStats: Option[String] = None,
-      isStrColHasValue: Boolean = false,
-      isNestedSchema: Boolean = false): Unit = {
-    val logFiles = if (isNestedSchema) nestedFiles else buildFiles(customStats, isStrColHasValue)
-    withDeltaLog(logFiles, isNestedSchema) { log =>
+      customFiles: Option[Seq[AddFile]] = None,
+      customMetadata: Option[Metadata] = None): Unit = {
+    val logFiles = customFiles.getOrElse(buildFiles(customStats))
+    withDeltaLog(logFiles, customMetadata) { log =>
       val scan = log.update().scan(expr)
       val iter = scan.getFiles
       var resFiles: Seq[String] = Seq()
@@ -412,13 +439,21 @@ class DataSkippingSuite extends FunSuite {
   /**
    * Filter: (i <= 5 AND i == "a")
    * Output: i = 1 or 2 or 3 or 4 or 5
-   * Reason: Because string type is currently unsupported, we can't evaluate column stats
+   * Reason: Because decimal type is currently unsupported, we can't evaluate column stats
    * predicate and will skip column stats filter.
    */
   test("integration test: unsupported stats data type") {
+    val customSchema = new StructType(Array(
+      new StructField("partitionCol", new LongType(), true),
+      new StructField("col1", new LongType(), true),
+      new StructField("col2", new LongType(), true),
+      new StructField("stringCol", new DecimalType(1, 1), true)
+    ))
     filePruningTest(expr = new And(metadataConjunct,
-        new EqualTo(schema.column("stringCol"), Literal.of("1"))),
-      target = Seq("1", "2", "3", "4", "5"), isStrColHasValue = true)
+        new EqualTo(customSchema.column("stringCol"), Literal.ofNull(new DecimalType(1, 1)))),
+      target = Seq("1", "2", "3", "4", "5"),
+      customMetadata = Some(Metadata(partitionColumns = partitionSchema.getFieldNames,
+        schemaString = customSchema.toJson)))
   }
 
   /**
@@ -428,9 +463,11 @@ class DataSkippingSuite extends FunSuite {
    * predicate and will skip column stats filter.
    */
   test("integration test: unsupported expression type") {
+
     filePruningTest(expr = new And(metadataConjunct,
         new LessThanOrEqual(schema.column("col1"), Literal.of(1L))),
-      target = Seq("1", "2", "3", "4", "5"))
+      target = Seq("1", "2", "3", "4", "5"),
+      customMetadata = Some(metadata))
   }
 
   /**
@@ -441,6 +478,88 @@ class DataSkippingSuite extends FunSuite {
    */
   test("integration test: unsupported nested column") {
     filePruningTest(expr = new EqualTo(nestedSchema.column("normalCol"), Literal.of(1L)),
-      target = Seq("nested"), isNestedSchema = true)
+      target = Seq("nested"),
+      customFiles = Some(nestedFiles),
+      customMetadata = Some(nestedMetadata))
+  }
+
+  /**
+   * Test expression evaluation with all supported data types.
+   * Type list: Binary, Boolean, Byte, Date, Double, Float, Integer, Short, String, Timestamp
+   *
+   * @param hits   The expression evaluated as true
+   * @param misses The expression evaluated as false
+   */
+  def dataTypeSupportTest(
+      hits: Seq[Expression],
+      misses: Seq[Expression]): Unit = {
+
+    val rowRecord = new ColumnStatsRowRecord(fullTypeSchema, Map(), fullTypeColumnStats)
+    hits foreach { hit =>
+      val result = hit.eval(rowRecord)
+      print(hit)
+      assert(result != null)
+      assert(result.isInstanceOf[Boolean])
+      assert(result.asInstanceOf[Boolean])
+    }
+    misses foreach { miss =>
+      val result = miss.eval(rowRecord)
+      assert(result != null)
+      assert(result.isInstanceOf[Boolean])
+      assert(!result.asInstanceOf[Boolean])
+    }
+  }
+
+  test("all supported data type test") {
+    val hits = Seq(
+      new EqualTo(new Column(postfixMax("binaryCol"), new BinaryType),
+        Literal.of("ab\"d".map(_.toByte).toArray)),
+      new EqualTo(new Column(postfixMax("booleanCol"), new BooleanType),
+        Literal.of(false)),
+      new EqualTo(new Column(postfixMax("byteCol"), new ByteType),
+        Literal.of(121.toByte)),
+      new EqualTo(new Column(postfixMax("dateCol"), new DateType),
+        Literal.of(Date.valueOf("2022-07-17"))),
+      new EqualTo(new Column(postfixMax("doubleCol"), new DoubleType),
+        Literal.of(11.1D)),
+      new EqualTo(new Column(postfixMax("floatCol"), new FloatType),
+        Literal.of(12.2F)),
+      new EqualTo(new Column(postfixMax("integerCol"), new IntegerType),
+        Literal.of(123456)),
+      new EqualTo(new Column(postfixMax("longCol"), new LongType),
+        Literal.of(4400000000L)),
+      new EqualTo(new Column(postfixMax("shortCol"), new ShortType),
+        Literal.of(32100.toShort)),
+      new EqualTo(new Column(postfixMax("stringCol"), new StringType),
+        Literal.of("ab\"d")),
+      new EqualTo(new Column(postfixMax("timestampCol"), new TimestampType),
+        Literal.of(Timestamp.valueOf("2022-05-16 09:00:00"))),
+    )
+
+    val misses = Seq(
+      new EqualTo(new Column(postfixMax("binaryCol"), new BinaryType),
+        Literal.of("ab\"c".map(_.toByte).toArray)),
+      new EqualTo(new Column(postfixMax("booleanCol"), new BooleanType),
+        Literal.of(true)),
+      new EqualTo(new Column(postfixMax("byteCol"), new ByteType),
+        Literal.of(-120.toByte)),
+      new EqualTo(new Column(postfixMax("dateCol"), new DateType),
+        Literal.of(Date.valueOf("2022-07-19"))),
+      new EqualTo(new Column(postfixMax("doubleCol"), new DoubleType),
+        Literal.of(11.0D)),
+      new EqualTo(new Column(postfixMax("floatCol"), new FloatType),
+        Literal.of(12.0F)),
+      new EqualTo(new Column(postfixMax("integerCol"), new IntegerType),
+        Literal.of(654321)),
+      new EqualTo(new Column(postfixMax("longCol"), new LongType),
+        Literal.of(3300000000L)),
+      new EqualTo(new Column(postfixMax("shortCol"), new ShortType),
+        Literal.of(32000.toShort)),
+      new EqualTo(new Column(postfixMax("stringCol"), new StringType),
+        Literal.of("ab\"de")),
+      new EqualTo(new Column(postfixMax("timestampCol"), new TimestampType),
+        Literal.of(Timestamp.valueOf("2022-07-16 19:00:00"))),
+    )
+    dataTypeSupportTest(hits, misses)
   }
 }

@@ -83,7 +83,6 @@ final private[internal] class FilteredDeltaScanImpl(
       // stats column in the filter that not appears in row record, then the filter is not
       // usable. We should not skipping this file.
       columnStatsFilter.get.referencedStats.foreach { statsCol =>
-        // now only support LongType.
         if (columnStatsRecord.isNullAt(statsCol.name)) {
           // If any stats in the column stats filter is null or missing, not skipping this file.
           return true

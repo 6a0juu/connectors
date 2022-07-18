@@ -20,8 +20,8 @@ import scala.collection.immutable
 
 import com.fasterxml.jackson.databind.JsonNode
 
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThanOrEqual, IsNotNull, LessThanOrEqual, Literal, Or}
-import io.delta.standalone.types.{LongType, StructType}
+import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThanOrEqual, LessThanOrEqual, Literal}
+import io.delta.standalone.types.{BinaryType, BooleanType, ByteType, DataType, DateType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructType, TimestampType}
 
 /**
  * Results returned by [[DataSkippingUtils.constructDataFilters]]. Contains the column stats
@@ -37,7 +37,7 @@ private [internal] case class ColumnStatsPredicate(
 private[internal] object DataSkippingUtils {
 
   // TODO: add extensible storage of column stats name and their data type.
-  //  (if data type is fixed, like type of `NUM_RECORDS` is always LongType)
+  //  (and document if data type is fixed, like type of `NUM_RECORDS` is always LongType)
   /* The total number of records in the file. */
   final val NUM_RECORDS = "numRecords"
   /* The smallest (possibly truncated) value for a column. */
@@ -46,6 +46,11 @@ private[internal] object DataSkippingUtils {
   final val MAX = "maxValues"
   /* The number of null values present for a column. */
   final val NULL_COUNT = "nullCount"
+
+  /** Supported data types in column stats */
+  final val supportedDataType = Seq(new BinaryType, new BooleanType, new ByteType, new DateType,
+    new DoubleType, new FloatType, new IntegerType, new LongType, new ShortType, new StringType,
+    new TimestampType)
 
   /**
    * Parse the stats in AddFile to two maps. The output contains two map distinguishing
@@ -74,7 +79,7 @@ private[internal] object DataSkippingUtils {
    *   }, ... // other stats
    * }
    *
-   * Currently nested column is not supported, only [[LongType]] is the supported data type.
+   * Currently nested column is not supported.
    *
    * @param tableSchema The table schema describes data column (not stats column) for this query.
    * @param statsString The json-formatted stats in raw string type in AddFile.
@@ -83,15 +88,15 @@ private[internal] object DataSkippingUtils {
    */
   def parseColumnStats(
       tableSchema: StructType,
-      statsString: String): (immutable.Map[String, Long], immutable.Map[String, Long]) = {
-    var fileStats: Map[String, Long] = Map()
-    var columnStats: Map[String, Long] = Map()
+      statsString: String): (immutable.Map[String, String], immutable.Map[String, String]) = {
+    var fileStats: Map[String, String] = Map()
+    var columnStats: Map[String, String] = Map()
     val columnNames = tableSchema.getFieldNames.toSeq
     JsonUtils.fromJson[Map[String, JsonNode]](statsString).foreach { stats =>
       if (!stats._2.isObject) {
         // This is an file-level stats, like ROW_RECORDS.
         if (stats._1 == NUM_RECORDS) {
-          fileStats += (stats._1 -> stats._2.asText.toLong)
+          fileStats += (stats._1 -> stats._2.asText)
         }
       } else {
         // This is an column-level stats, like MIN_VALUE and MAX_VALUE, iterator through the table
@@ -105,12 +110,14 @@ private[internal] object DataSkippingUtils {
             val statsName = columnName + "." + statsType
             statsType match {
               case MIN | MAX =>
-                // Check the stats type for MIN and MAX, as we only accepting the LongType for now.
-                if (tableSchema.get(columnName).getDataType == new LongType) {
-                  columnStats += (statsName -> statsVal.asText.toLong)
+                // Check the stats type for MIN and MAX.
+                val dataType = tableSchema.get(columnName).getDataType
+                if (DataSkippingUtils.isSupportedType(dataType)) {
+                  columnStats += (statsName -> statsVal.asText)
                 }
               case NULL_COUNT =>
-                columnStats += (statsName -> statsVal.asText.toLong)
+                columnStats += (statsName -> statsVal.asText)
+              case _ =>
             }
           }
         }
@@ -138,13 +145,15 @@ private[internal] object DataSkippingUtils {
       case eq: EqualTo => (eq.getLeft, eq.getRight) match {
         case (e1: Column, e2: Literal) =>
           val columnPath = e1.name
-          if (!(tableSchema.getFieldNames.contains(columnPath) &&
-          tableSchema.get(columnPath).getDataType == new LongType)) {
-            // Only accepting the LongType column for now.
+          if (!tableSchema.getFieldNames.contains(columnPath)) {
             return None
           }
-          val minColumn = new Column(columnPath + "." + MIN, new LongType)
-          val maxColumn = new Column(columnPath + "." + MAX, new LongType)
+          val dataType = tableSchema.get(columnPath).getDataType
+          if (!DataSkippingUtils.isSupportedType(dataType)) {
+            return None
+          }
+          val minColumn = new Column(columnPath + "." + MIN, dataType)
+          val maxColumn = new Column(columnPath + "." + MAX, dataType)
 
           Some(ColumnStatsPredicate(
             new And(new LessThanOrEqual(minColumn, e2),
@@ -165,4 +174,7 @@ private[internal] object DataSkippingUtils {
       // TODO: support full types of Expression
       case _ => None
     }
+
+  def isSupportedType(dataType: DataType): Boolean =
+    supportedDataType.contains(dataType)
 }
