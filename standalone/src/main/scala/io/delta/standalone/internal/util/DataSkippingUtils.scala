@@ -18,7 +18,7 @@ package io.delta.standalone.internal.util
 
 import com.fasterxml.jackson.databind.JsonNode
 
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThanOrEqual, LessThanOrEqual, Literal}
+import io.delta.standalone.expressions.{And, BinaryComparison, Column, EqualTo, Expression, GreaterThanOrEqual, LessThanOrEqual, Literal, Or}
 import io.delta.standalone.types.{BooleanType, ByteType, DataType, DoubleType, FloatType, IntegerType, LongType, ShortType, StructField, StructType}
 
 import io.delta.standalone.internal.exception.DeltaErrors
@@ -174,6 +174,31 @@ private[internal] object DataSkippingUtils {
   def statsColumnBuilder(statsType: String, columnName: String, dataType: DataType): Column =
     new Column(statsType + "." + columnName, dataType)
 
+  def buildBinaryComparatorFilter(
+      dataSchema: StructType,
+      expr: BinaryComparison,
+      transformRule: (Column, Column, Literal) => Expression,
+      swapRule: (Literal, Column) => Expression): Option[Expression] = {
+    (expr.getLeft, expr.getRight) match {
+      case (e1: Column, e2: Literal) =>
+        val columnPath = e1.name
+        if (!dataSchema.contains(columnPath)) {
+          return None
+        }
+        val dataType = dataSchema.get(columnPath).getDataType
+        if (!isValidType(dataType)) {
+          return None
+        }
+        val minColumn = statsColumnBuilder(MIN, columnPath, dataType)
+        val maxColumn = statsColumnBuilder(MAX, columnPath, dataType)
+
+        Some(transformRule(minColumn, maxColumn, e2))
+      case (e1: Literal, e2: Column) =>
+        constructDataFilters(dataSchema, Some(swapRule(e1, e2)))
+      case _ => None
+    }
+  }
+
   /**
    * Build the column stats filter based on query predicate and the schema of data columns.
    *
@@ -192,30 +217,29 @@ private[internal] object DataSkippingUtils {
       dataSchema: StructType,
       dataConjunction: Option[Expression]): Option[Expression] =
     dataConjunction match {
-      case Some(eq: EqualTo) => (eq.getLeft, eq.getRight) match {
-        case (e1: Column, e2: Literal) =>
-          val columnPath = e1.name
-          if (!dataSchema.contains(columnPath)) {
-              return None
-          }
-          val dataType = dataSchema.get(columnPath).getDataType
-          if (!isValidType(dataType)) {
-            return None
-          }
-          val minColumn = statsColumnBuilder(MIN, columnPath, dataType)
-          val maxColumn = statsColumnBuilder(MAX, columnPath, dataType)
+      case Some(eq: EqualTo) =>
+        val rule = (minCol: Column, maxCol: Column, e2: Literal) =>
+          new And(
+            new LessThanOrEqual(minCol, e2),
+            new GreaterThanOrEqual(maxCol, e2))
+        val rRule = (e1: Literal, e2: Column) => new And(e2, e1)
+        buildBinaryComparatorFilter(dataSchema, eq, rule, rRule)
 
-          Some(new And(
-              new LessThanOrEqual(minColumn, e2),
-              new GreaterThanOrEqual(maxColumn, e2)))
-        case _ => None
-      }
       case Some(and: And) =>
         val e1 = constructDataFilters(dataSchema, Some(and.getLeft))
         val e2 = constructDataFilters(dataSchema, Some(and.getRight))
-
         (e1, e2) match {
           case (Some(e1), Some(e2)) => Some(new And(e1, e2))
+          case (Some(e1), _) => Some(e1)
+          case (_, Some(e2)) => Some(e2)
+          case _ => None
+        }
+
+      case Some(or: Or) =>
+        val e1 = constructDataFilters(dataSchema, Some(or.getLeft))
+        val e2 = constructDataFilters(dataSchema, Some(or.getRight))
+        (e1, e2) match {
+          case (Some(e1), Some(e2)) => Some(new Or(e1, e2))
           case _ => None
         }
 
