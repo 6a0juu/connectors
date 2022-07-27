@@ -236,7 +236,7 @@ class DataSkippingUtilsSuite extends FunSuite {
       new GreaterThanOrEqual(col1, long1) -> new GreaterThanOrEqual(col1Max, long1),
       new GreaterThanOrEqual(long1, col1) -> new LessThanOrEqual(col1Min, long1),
       new GreaterThanOrEqual(col1, col2) -> new GreaterThanOrEqual(col1Max, col2Min),
-      new GreaterThanOrEqual(long1, long2) -> new GreaterThanOrEqual(long1, long2),
+      new GreaterThanOrEqual(long1, long2) -> new GreaterThanOrEqual(long1, long2)
     )
 
     rules.foreach { case (input, expected) =>
