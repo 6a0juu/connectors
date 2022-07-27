@@ -18,7 +18,7 @@ package io.delta.standalone.internal.util
 
 import com.fasterxml.jackson.databind.JsonNode
 
-import io.delta.standalone.expressions.{And, BinaryComparison, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Literal, Or}
+import io.delta.standalone.expressions.{And, BinaryComparison, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or}
 import io.delta.standalone.types.{BooleanType, ByteType, DataType, DoubleType, FloatType, IntegerType, LongType, ShortType, StructField, StructType}
 
 import io.delta.standalone.internal.exception.DeltaErrors
@@ -319,7 +319,59 @@ private[internal] object DataSkippingUtils {
           case _ => None
         }
 
-      // TODO: support full types of Expression
+      case Some(isNull: IsNull) => isNull.getChild match {
+        case col: Column =>
+          val ncCol = statsColumnBuilder(NULL_COUNT, col.name, new LongType)
+          Some(new GreaterThan(ncCol, Literal.of(0L)))
+        case _ => None
+      }
+      case Some(isNotNull: IsNotNull) => isNotNull.getChild match {
+        case col: Column =>
+          val ncCol = statsColumnBuilder(NULL_COUNT, col.name, new LongType)
+          val nrCol = new Column(NUM_RECORDS, new LongType)
+          Some(new LessThan(ncCol, nrCol))
+        case _ => None
+      }
+
+      case Some(not: Not) => not.getChild match {
+        case eq: EqualTo =>
+          val clRule = (minCol: Column, maxCol: Column, e2: Literal) =>
+            new And(
+              new LessThanOrEqual(minCol, e2),
+              new GreaterThanOrEqual(maxCol, e2))
+          val lcRule = (e1: Literal, e2: Column) => new EqualTo(e2, e1)
+          val ccRule = (e1Min: Column, e1Max: Column, e2Min: Column, e2Max: Column) =>
+            new And(
+              new LessThanOrEqual(e1Min, e2Max),
+              new GreaterThanOrEqual(e1Max, e2Min))
+          buildBinaryComparatorFilter(dataSchema, eq, ccRule, clRule, lcRule)
+
+        case lt: LessThan =>
+          constructDataFilters(dataSchema, Some(new GreaterThanOrEqual(lt.getLeft, lt.getRight)))
+        case gt: GreaterThan =>
+          constructDataFilters(dataSchema, Some(new LessThanOrEqual(gt.getLeft, gt.getRight)))
+        case leq: LessThanOrEqual =>
+          constructDataFilters(dataSchema, Some(new GreaterThan(leq.getLeft, leq.getRight)))
+        case geq: GreaterThanOrEqual =>
+          constructDataFilters(dataSchema, Some(new LessThan(geq.getLeft, geq.getRight)))
+        case and: And =>
+          constructDataFilters(
+            dataSchema,
+            Some(new Or(new Not(and.getLeft), new Not(and.getRight))))
+        case or: Or =>
+          constructDataFilters(
+            dataSchema,
+            Some(new And(new Not(or.getLeft), new Not(or.getRight))))
+        case isNull: IsNull =>
+          constructDataFilters(dataSchema, Some(new IsNotNull(isNull.getChild)))
+        case isNotNull: IsNotNull =>
+          constructDataFilters(dataSchema, Some(new IsNull(isNotNull.getChild)))
+        case not1: Not =>
+          constructDataFilters(dataSchema, Some(not1.getChild))
+        case _ => None
+      }
+
+      // TODO: support IN and LIKE expression
       case _ => None
     }
 
