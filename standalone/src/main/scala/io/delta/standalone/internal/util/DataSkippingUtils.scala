@@ -336,14 +336,14 @@ private[internal] object DataSkippingUtils {
       case Some(not: Not) => not.getChild match {
         case eq: EqualTo =>
           val clRule = (minCol: Column, maxCol: Column, e2: Literal) =>
-            new And(
-              new LessThanOrEqual(minCol, e2),
-              new GreaterThanOrEqual(maxCol, e2))
+            new Or(
+              new LessThan(maxCol, e2),
+              new GreaterThan(minCol, e2))
           val lcRule = (e1: Literal, e2: Column) => new EqualTo(e2, e1)
           val ccRule = (e1Min: Column, e1Max: Column, e2Min: Column, e2Max: Column) =>
             new And(
-              new LessThanOrEqual(e1Min, e2Max),
-              new GreaterThanOrEqual(e1Max, e2Min))
+              new LessThan(e1Max, e2Min),
+              new GreaterThan(e1Min, e2Max))
           buildBinaryComparatorFilter(dataSchema, eq, ccRule, clRule, lcRule)
 
         case lt: LessThan =>
