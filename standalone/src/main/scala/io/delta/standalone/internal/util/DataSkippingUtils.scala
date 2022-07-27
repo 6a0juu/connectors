@@ -130,9 +130,7 @@ private[internal] object DataSkippingUtils {
     var columnStats = Map[String, String]()
 
     val dataColumns = dataSchema.getFields
-    JsonUtils.fromJson[Map[String, JsonNode]](statsString).foreach { stats =>
-      val statsType = stats._1
-      val statsObj = stats._2
+    JsonUtils.fromJson[Map[String, JsonNode]](statsString).foreach { case (statsType, statsObj) =>
       if (!statsObj.isObject) {
         // This is an file-specific stats, like ROW_RECORDS.
         val statsVal = statsObj.asText
