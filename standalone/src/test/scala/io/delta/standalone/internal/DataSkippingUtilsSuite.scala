@@ -21,7 +21,7 @@ import java.sql.{Date, Timestamp}
 import com.fasterxml.jackson.core.io.JsonEOFException
 import org.scalatest.FunSuite
 
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, LessThan, LessThanOrEqual, Literal}
+import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, LessThan, LessThanOrEqual, Literal, Or}
 import io.delta.standalone.types.{BinaryType, BooleanType, ByteType, DataType, DateType, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType, TimestampType}
 
 import io.delta.standalone.internal.data.ColumnStatsRowRecord
@@ -173,12 +173,37 @@ class DataSkippingUtilsSuite extends FunSuite {
       inputExpr = Some(new EqualTo(col1, long1)),
       expectedOutputExpr = Some(eqCast("col1", new LongType, long1)))
 
-    // col1 == 1 AND col2 == 1
+    // col1 == 1 AND col2 == 2
     testConstructDataFilter(
       inputExpr = Some(new And(
         new EqualTo(col1, long1),
         new EqualTo(col2, long2))),
       expectedOutputExpr = Some(new And(
+        eqCast("col1", new LongType, long1),
+        eqCast("col2", new LongType, long2))))
+
+    // partial `And`: `IsNotNull` is not supported, only return one child as output.
+    testConstructDataFilter(
+      inputExpr = Some(
+        new And(
+          new EqualTo(col1, long1),
+          new IsNotNull(col2))),
+      expectedOutputExpr = Some(
+        eqCast("col1", new LongType, long1)))
+    testConstructDataFilter(
+      inputExpr = Some(
+        new And(
+          new IsNotNull(col2),
+          new EqualTo(col1, long1))),
+      expectedOutputExpr = Some(
+        eqCast("col1", new LongType, long1)))
+
+    // col1 == 1 OR col2 == 2
+    testConstructDataFilter(
+      inputExpr = Some(new Or(
+        new EqualTo(col1, long1),
+        new EqualTo(col2, long2))),
+      expectedOutputExpr = Some(new Or(
         eqCast("col1", new LongType, long1),
         eqCast("col2", new LongType, long2))))
 
