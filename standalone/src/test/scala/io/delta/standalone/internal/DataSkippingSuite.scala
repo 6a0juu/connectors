@@ -20,7 +20,7 @@ import org.apache.hadoop.conf.Configuration
 import org.scalatest.FunSuite
 
 import io.delta.standalone.{DeltaLog, Operation}
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, LessThanOrEqual, Literal}
+import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, IsNotNull, LessThanOrEqual, Literal}
 import io.delta.standalone.types.{BinaryType, BooleanType, ByteType, DateType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType, TimestampType}
 
 import io.delta.standalone.internal.actions.{Action, AddFile, Metadata}
@@ -332,15 +332,15 @@ class DataSkippingSuite extends FunSuite {
   }
 
   /**
-   * Filter: (col1 <= 1)
+   * Filter: IsNotNull(col1)
    * Column stats filter: None
    * Output: All files.
-   * Reason: Because LessThanOrEqual is currently unsupported in building column stats predicate,
+   * Reason: Because `IsNotNull` is currently unsupported in building column stats predicate,
    * the column stats filter will be empty and return all the files.
    */
   test("integration test: unsupported expression type") {
     columnStatsBasedFilePruningTest(
-      expr = new LessThanOrEqual(schema.column("col1"), Literal.of(1L)),
+      expr = new IsNotNull(schema.column("col1")),
       matchedFilePaths = (1 to 20).map(_.toString))
   }
 

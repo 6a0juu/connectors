@@ -21,7 +21,7 @@ import java.sql.{Date, Timestamp}
 import com.fasterxml.jackson.core.io.JsonEOFException
 import org.scalatest.FunSuite
 
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThanOrEqual, IsNotNull, LessThanOrEqual, Literal}
+import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, LessThan, LessThanOrEqual, Literal}
 import io.delta.standalone.types.{BinaryType, BooleanType, ByteType, DataType, DateType, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType, TimestampType}
 
 import io.delta.standalone.internal.data.ColumnStatsRowRecord
@@ -160,8 +160,11 @@ class DataSkippingUtilsSuite extends FunSuite {
     }
 
     val col1 = new Column("col1", new LongType)
+    val col1Min = new Column(s"$MIN.col1", new LongType)
+    val col1Max = new Column(s"$MAX.col1", new LongType)
     val col2 = new Column("col2", new LongType)
-
+    val col2Min = new Column(s"$MIN.col2", new LongType)
+    val col2Max = new Column(s"$MAX.col2", new LongType)
     val long1 = Literal.of(1L)
     val long2 = Literal.of(2L)
 
@@ -179,9 +182,9 @@ class DataSkippingUtilsSuite extends FunSuite {
         eqCast("col1", new LongType, long1),
         eqCast("col2", new LongType, long2))))
 
-    // col1 >= 1, `>=` is not supported
+    // IsNotNull(col1), `IsNotNull` is not supported
     testConstructDataFilter(
-      inputExpr = Some(new GreaterThanOrEqual(col1, long1)),
+      inputExpr = Some(new IsNotNull(col1)),
       expectedOutputExpr = None)
 
     // `col1 IS NOT NULL` is not supported
@@ -198,6 +201,47 @@ class DataSkippingUtilsSuite extends FunSuite {
     testConstructDataFilter(
       inputExpr = Some(new EqualTo(new Column("col3", new LongType), long1)),
       expectedOutputExpr = None)
+
+    // test all the rules in filter transformation for binary comparator
+    val rules = Seq(
+      new EqualTo(col1, long1) ->
+        new And(
+          new LessThanOrEqual(col1Min, long1),
+          new GreaterThanOrEqual(col1Max, long1)),
+      new EqualTo(long1, col1) ->
+        new And(
+          new LessThanOrEqual(col1Min, long1),
+          new GreaterThanOrEqual(col1Max, long1)),
+      new EqualTo(col1, col2) ->
+        new And(
+          new LessThanOrEqual(col1Min, col2Max),
+          new GreaterThanOrEqual(col1Max, col2Min)),
+      new EqualTo(long1, long2) -> new EqualTo(long1, long2),
+
+      new LessThan(col1, long1) -> new LessThan(col1Min, long1),
+      new LessThan(long1, col1) -> new GreaterThan(col1Max, long1),
+      new LessThan(col1, col2) -> new LessThan(col1Min, col2Max),
+      new LessThan(long1, long2) -> new LessThan(long1, long2),
+
+      new GreaterThan(col1, long1) -> new GreaterThan(col1Max, long1),
+      new GreaterThan(long1, col1) -> new LessThan(col1Min, long1),
+      new GreaterThan(col1, col2) -> new GreaterThan(col1Max, col2Min),
+      new GreaterThan(long1, long2) -> new GreaterThan(long1, long2),
+
+      new LessThanOrEqual(col1, long1) -> new LessThanOrEqual(col1Min, long1),
+      new LessThanOrEqual(long1, col1) -> new GreaterThanOrEqual(col1Max, long1),
+      new LessThanOrEqual(col1, col2) -> new LessThanOrEqual(col1Min, col2Max),
+      new LessThanOrEqual(long1, long2) -> new LessThanOrEqual(long1, long2),
+
+      new GreaterThanOrEqual(col1, long1) -> new GreaterThanOrEqual(col1Max, long1),
+      new GreaterThanOrEqual(long1, col1) -> new LessThanOrEqual(col1Min, long1),
+      new GreaterThanOrEqual(col1, col2) -> new GreaterThanOrEqual(col1Max, col2Min),
+      new GreaterThanOrEqual(long1, long2) -> new GreaterThanOrEqual(long1, long2),
+    )
+
+    rules.foreach { case (input, expected) =>
+      testConstructDataFilter(Some(input), Some(expected))
+    }
   }
 
   test("unit test: column stats row record") {

@@ -264,17 +264,17 @@ private[internal] object DataSkippingUtils {
           new And(
             new LessThanOrEqual(minCol, e2),
             new GreaterThanOrEqual(maxCol, e2))
-        val lcRule = (e1: Literal, e2: Column) => new And(e2, e1)
+        val lcRule = (e1: Literal, e2: Column) => new EqualTo(e2, e1)
         val ccRule = (e1Min: Column, e1Max: Column, e2Min: Column, e2Max: Column) =>
           new And(
-            new GreaterThanOrEqual(e1Max, e2Min),
-            new LessThanOrEqual(e1Min, e2Max))
+            new LessThanOrEqual(e1Min, e2Max),
+            new GreaterThanOrEqual(e1Max, e2Min))
         buildBinaryComparatorFilter(dataSchema, eq, ccRule, clRule, lcRule)
 
       case Some(lt: LessThan) =>
         val clRule = (minCol: Column, _: Column, e2: Literal) =>
           new LessThan(minCol, e2)
-        val lcRule = (e1: Literal, e2: Column) => new GreaterThanOrEqual(e2, e1)
+        val lcRule = (e1: Literal, e2: Column) => new GreaterThan(e2, e1)
         val ccRule = (e1Min: Column, _: Column, _: Column, e2Max: Column) =>
           new LessThan(e1Min, e2Max)
         buildBinaryComparatorFilter(dataSchema, lt, ccRule, clRule, lcRule)
@@ -282,7 +282,7 @@ private[internal] object DataSkippingUtils {
       case Some(gt: GreaterThan) =>
         val clRule = (_: Column, maxCol: Column, e2: Literal) =>
           new GreaterThan(maxCol, e2)
-        val lcRule = (e1: Literal, e2: Column) => new LessThanOrEqual(e2, e1)
+        val lcRule = (e1: Literal, e2: Column) => new LessThan(e2, e1)
         val ccRule = (_: Column, e1Max: Column, e2Min: Column, _: Column) =>
           new GreaterThan(e1Max, e2Min)
         buildBinaryComparatorFilter(dataSchema, gt, ccRule, clRule, lcRule)
@@ -290,15 +290,15 @@ private[internal] object DataSkippingUtils {
       case Some(leq: LessThanOrEqual) =>
         val clRule = (minCol: Column, _: Column, e2: Literal) =>
           new LessThanOrEqual(minCol, e2)
-        val lcRule = (e1: Literal, e2: Column) => new GreaterThan(e2, e1)
+        val lcRule = (e1: Literal, e2: Column) => new GreaterThanOrEqual(e2, e1)
         val ccRule = (e1Min: Column, _: Column, _: Column, e2Max: Column) =>
           new LessThanOrEqual(e1Min, e2Max)
         buildBinaryComparatorFilter(dataSchema, leq, ccRule, clRule, lcRule)
 
-      case Some(geq: GreaterThan) =>
+      case Some(geq: GreaterThanOrEqual) =>
         val clRule = (_: Column, maxCol: Column, e2: Literal) =>
           new GreaterThanOrEqual(maxCol, e2)
-        val lcRule = (e1: Literal, e2: Column) => new LessThan(e2, e1)
+        val lcRule = (e1: Literal, e2: Column) => new LessThanOrEqual(e2, e1)
         val ccRule = (_: Column, e1Max: Column, e2Min: Column, _: Column) =>
           new GreaterThanOrEqual(e1Max, e2Min)
         buildBinaryComparatorFilter(dataSchema, geq, ccRule, clRule, lcRule)
