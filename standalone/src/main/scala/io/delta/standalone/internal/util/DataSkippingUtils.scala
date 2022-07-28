@@ -337,8 +337,8 @@ private[internal] object DataSkippingUtils {
         case eq: EqualTo =>
           val clRule = (minCol: Column, maxCol: Column, e2: Literal) =>
             new Or(
-              new LessThan(maxCol, e2),
-              new GreaterThan(minCol, e2))
+              new LessThan(minCol, e2),
+              new GreaterThan(maxCol, e2))
           val lcRule = (e1: Literal, e2: Column) => new EqualTo(e2, e1)
           val ccRule = (e1Min: Column, e1Max: Column, e2Min: Column, e2Max: Column) =>
             new And(
