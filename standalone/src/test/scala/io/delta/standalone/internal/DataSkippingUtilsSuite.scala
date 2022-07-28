@@ -21,7 +21,7 @@ import java.sql.{Date, Timestamp}
 import com.fasterxml.jackson.core.io.JsonEOFException
 import org.scalatest.FunSuite
 
-import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or}
+import io.delta.standalone.expressions.{And, Column, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, In, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or}
 import io.delta.standalone.types.{BinaryType, BooleanType, ByteType, DataType, DateType, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType, TimestampType}
 
 import io.delta.standalone.internal.data.ColumnStatsRowRecord
@@ -185,17 +185,18 @@ class DataSkippingUtilsSuite extends FunSuite {
         eqCast("col2", new LongType, long2))))
 
     // partial `And`: `IsNotNull` is not supported, only return one child as output.
+    import scala.collection.JavaConverters._
     testConstructDataFilter(
       inputExpr = Some(
         new And(
           new EqualTo(col1, long1),
-          new IsNotNull(col2))),
+          new In(schema.column("col1"), List(schema.column("col2")).asJava))),
       expectedOutputExpr = Some(
         eqCast("col1", new LongType, long1)))
     testConstructDataFilter(
       inputExpr = Some(
         new And(
-          new IsNotNull(col2),
+          new In(schema.column("col1"), List(schema.column("col2")).asJava),
           new EqualTo(col1, long1))),
       expectedOutputExpr = Some(
         eqCast("col1", new LongType, long1)))
@@ -211,12 +212,7 @@ class DataSkippingUtilsSuite extends FunSuite {
 
     // IsNotNull(col1), `IsNotNull` is not supported
     testConstructDataFilter(
-      inputExpr = Some(new IsNotNull(col1)),
-      expectedOutputExpr = None)
-
-    // `col1 IS NOT NULL` is not supported
-    testConstructDataFilter(
-      inputExpr = Some(new IsNotNull(col1)),
+      inputExpr = Some(new In(schema.column("col1"), List(schema.column("col2")).asJava)),
       expectedOutputExpr = None)
 
     // stringCol = 1, StringType is not supported
@@ -270,8 +266,8 @@ class DataSkippingUtilsSuite extends FunSuite {
 
       new Not(new EqualTo(col1, long1)) ->
         new Or(
-          new GreaterThan(col1Max, long1),
-          new LessThan(col1Min, long1)),
+          new LessThan(col1Min, long1),
+          new GreaterThan(col1Max, long1)),
       new Not(new LessThan(col1, long1)) -> new GreaterThanOrEqual(col1Max, long1),
       new Not(new GreaterThan(col1, long1)) -> new LessThanOrEqual(col1Min, long1),
       new Not(new LessThanOrEqual(col1, long1)) -> new GreaterThan(col1Max, long1),
